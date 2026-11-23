@@ -13,6 +13,15 @@
   </header>
 
   <section>
+    <h2>Screenshots</h2>
+    <p id="current-scene" class="status"></p>
+    <p id="shot-scopes" class="status bad" hidden></p>
+    <p class="hint">New screenshots wait here until you send or skip them. <strong>A sent screenshot goes
+      live in the scene's gallery at once.</strong> Skipping never touches the file.</p>
+    <div id="shots"></div>
+  </section>
+
+  <section>
     <h2>Site</h2>
     <p id="connection" class="status"></p>
     <form id="token-form">
@@ -23,8 +32,9 @@
         <button type="button" id="clear-token">Remove</button>
         <button type="button" id="recheck">Check</button>
       </div>
-      <p class="hint">Make one at ADM → AI Access, for an AI account, with the <code>upload</code> scope.
-        It's kept in Windows Credential Manager, never in a file.</p>
+      <p class="hint">Make one at ADM → AI Access, for an AI account: <code>upload</code> for exports,
+        <code>read</code> and <code>images</code> for screenshots. It's kept in Windows Credential Manager,
+        never in a file.</p>
     </form>
   </section>
 
@@ -34,6 +44,10 @@
       <label for="lua-folder">The game's Lua folder</label>
       <input id="lua-folder" type="text" spellcheck="false">
       <div class="row" id="lua-presets"></div>
+      <label for="shot-folder">The game's screenshot folder</label>
+      <input id="shot-folder" type="text" spellcheck="false">
+      <div class="row" id="shot-presets"></div>
+      <p id="client-mismatch" class="hint warn" hidden></p>
       <label for="site-url">Site</label>
       <input id="site-url" type="text" spellcheck="false">
       <label class="check"><input id="auto-upload" type="checkbox"> Upload new exports as the game writes them</label>

@@ -16,13 +16,16 @@ pub struct Settings {
     pub site_url: String,
     /// Upload new exports as they're written. Off: the files are only listed, for uploading by hand.
     pub auto_upload: bool,
+    /// Where the game saves screenshots (F11). New ones here are offered for their scene's gallery.
+    pub screenshot_folder: Option<PathBuf>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         // Start with the regular client's folder when it exists.
         let lua_folder = lua_folders().into_iter().map(|(_, path)| path).find(|p| p.is_dir());
-        Settings { lua_folder, site_url: DEFAULT_SITE_URL.to_string(), auto_upload: true }
+        let screenshot_folder = screenshot_folders().into_iter().map(|(_, path)| path).find(|p| p.is_dir());
+        Settings { lua_folder, site_url: DEFAULT_SITE_URL.to_string(), auto_upload: true, screenshot_folder }
     }
 }
 
@@ -36,6 +39,31 @@ pub fn lua_folders() -> Vec<(&'static str, PathBuf)> {
         ("Regular client", catnip.join("Shroud of the Avatar").join("Lua")),
         ("QA client", catnip.join("Shroud of the Avatar(DEV)").join("Lua")),
     ]
+}
+
+/// The two clients' screenshot folders (EXPORT-FORMAT.md, "Where the game saves screenshots"): the
+/// regular client saves in `Pictures\SotA` itself, the QA client in `Pictures\SotA\DEV`.
+pub fn screenshot_folders() -> Vec<(&'static str, PathBuf)> {
+    let Some(profile) = std::env::var_os("USERPROFILE") else {
+        return vec![];
+    };
+    let sota = PathBuf::from(profile).join("Pictures").join("SotA");
+    vec![("Regular client", sota.clone()), ("QA client", sota.join("DEV"))]
+}
+
+/// A warning when the two folders look like different clients: screenshots would then be matched
+/// against the other client's scenes.
+pub fn client_mismatch(settings: &Settings) -> Option<String> {
+    let (Some(lua), Some(shots)) = (&settings.lua_folder, &settings.screenshot_folder) else {
+        return None;
+    };
+    let lua_is_qa = lua.to_string_lossy().contains("(DEV)");
+    let shots_is_qa = shots.file_name().is_some_and(|n| n.eq_ignore_ascii_case("DEV"));
+    (lua_is_qa != shots_is_qa).then(|| {
+        "The Lua folder and the screenshot folder look like different clients (regular and QA). \
+         Screenshots are matched to the scenes of the client whose Lua folder is chosen."
+            .to_string()
+    })
 }
 
 impl Settings {
@@ -83,6 +111,7 @@ mod tests {
             lua_folder: Some(PathBuf::from(r"C:\Lua")),
             site_url: "https://x.test".into(),
             auto_upload: false,
+            screenshot_folder: None,
         };
         settings.save(&path).unwrap();
         let loaded = Settings::load(&path);
@@ -99,6 +128,19 @@ mod tests {
         let loaded = Settings::load(&path);
         assert_eq!(loaded.site_url, DEFAULT_SITE_URL);
         assert!(loaded.auto_upload);
+    }
+
+    #[test]
+    fn warns_when_the_folders_are_different_clients() {
+        let mut s = Settings {
+            lua_folder: Some(PathBuf::from(r"C:\A\Catnip Games\Shroud of the Avatar(DEV)\Lua")),
+            site_url: DEFAULT_SITE_URL.into(),
+            auto_upload: true,
+            screenshot_folder: Some(PathBuf::from(r"C:\Users\x\Pictures\SotA\DEV")),
+        };
+        assert!(client_mismatch(&s).is_none());
+        s.screenshot_folder = Some(PathBuf::from(r"C:\Users\x\Pictures\SotA"));
+        assert!(client_mismatch(&s).is_some());
     }
 
     #[test]

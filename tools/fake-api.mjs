@@ -1,20 +1,30 @@
 // A stand-in for the site's API, for trying the companion without a real token or touching the site.
-// It answers GET /api/v1/me and the three upload endpoints the way sotalore/docs/api.md says, and
-// keeps nothing on disk.
+// It answers GET /api/v1/me, the three upload endpoints, GET /scenes and POST /scenes/:id/images the
+// way sotalore/docs/api.md says, and keeps nothing on disk (images are counted, not stored).
 //
-//   npm run fake-api                    # http://localhost:4567, token slt_fake (scope: upload)
-//   FAIL_FIRST=2 npm run fake-api       # the first 2 uploads get a 503, to watch the retries
-//   SCOPES=read npm run fake-api        # a token without upload
+//   npm run fake-api                    # http://localhost:4567, token slt_fake (upload, read, images)
+//   FAIL_FIRST=2 npm run fake-api       # the first 2 uploads or images get a 503, to watch the retries
+//   SCOPES=upload,images npm run fake-api   # a token without read (or leave out any scope)
 //
 // In the companion, set the site to http://localhost:4567 and the token to slt_fake.
+// Its scenes: Owl's Head (game name OwlsHead_01), Novia (Novia), and West Ravenswood, which has no
+// game name yet, so a screenshot taken there has to be given its scene by name.
 
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 
 const PORT = Number(process.env.PORT ?? 4567);
 const TOKEN = process.env.TOKEN ?? "slt_fake";
-const SCOPES = (process.env.SCOPES ?? "upload").split(",");
+const SCOPES = (process.env.SCOPES ?? "upload,read,images").split(",");
 let failFirst = Number(process.env.FAIL_FIRST ?? 0);
+
+const base = `http://localhost:${PORT}`;
+const SCENES = [
+  { id: 41, name: "Owl's Head", game_name: "OwlsHead_01", region: "Novia", scene_type: "town", level: "Tier 1", level_plus: false, parent: null },
+  { id: 7, name: "Novia", game_name: "Novia", region: "Novia", scene_type: "overworld", level: null, level_plus: false, parent: null },
+  { id: 12, name: "West Ravenswood", game_name: null, region: "Novia", scene_type: "wilderness", level: "Tier 2", level_plus: false, parent: null },
+].map((s) => ({ ...s, images: 0, url: `${base}/scenes/${s.id}` }));
+const sceneImages = new Map(); // "sceneId:sha256" -> the image made
 
 const ENDPOINTS = {
   "/api/v1/recipe_imports": { type: "recipes", count: (j) => ({ entries: j.recipes?.length ?? 0, full_export: j.scope === "all", scope: j.scope ?? null }) },
@@ -32,8 +42,8 @@ function send(res, status, body) {
   console.log(`  -> ${status} ${JSON.stringify(body)}`);
 }
 
-// Pulls the `file` field out of a multipart/form-data body.
-function fileField(contentType, body) {
+// Pulls a field out of a multipart/form-data body: { filename, content } (content is a Buffer).
+function formField(contentType, body, name = "file") {
   const boundary = /boundary=(?:"([^"]+)"|([^;]+))/.exec(contentType ?? "");
   if (!boundary) return null;
   const marker = "--" + (boundary[1] ?? boundary[2]);
@@ -42,12 +52,65 @@ function fileField(contentType, body) {
     const split = part.indexOf("\r\n\r\n");
     if (split < 0) continue;
     const headers = part.slice(0, split);
-    if (!/name="file"/.test(headers)) continue;
-    const filename = /filename="([^"]*)"/.exec(headers)?.[1] ?? "upload.json";
+    if (!new RegExp(`name="${name}"`).test(headers)) continue;
+    const filename = /filename="([^"]*)"/.exec(headers)?.[1] ?? "upload";
     const content = Buffer.from(part.slice(split + 4).replace(/\r\n$/, ""), "latin1");
     return { filename, content };
   }
   return null;
+}
+const fileField = (contentType, body) => formField(contentType, body, "file");
+
+// The image's type from its bytes, as the site does: PNG, JPEG or WebP, or null.
+function imageType(b) {
+  if (b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (b[0] === 0xff && b[1] === 0xd8) return "image/jpeg";
+  if (b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+  return null;
+}
+
+// GET /api/v1/scenes and POST /api/v1/scenes/:id/images. Returns true if it answered.
+function scenesApi(req, res, body) {
+  const url = new URL(req.url, base);
+  if (req.method === "GET" && url.pathname === "/api/v1/scenes") {
+    if (!SCOPES.includes("read")) return send(res, 403, { error: "This token doesn't have the read scope" }), true;
+    const p = url.searchParams;
+    const list = SCENES.filter((s) =>
+      (!p.has("game_name") || s.game_name === p.get("game_name")) &&
+      (!p.has("name") || s.name.toLowerCase() === p.get("name").toLowerCase()) &&
+      (!p.has("q") || s.name.toLowerCase().includes(p.get("q").toLowerCase())));
+    send(res, 200, { scenes: list, page: { number: 1, per: Number(p.get("per") ?? 25), total_count: list.length, total_pages: 1 } });
+    return true;
+  }
+  const match = /^\/api\/v1\/scenes\/(\d+)\/images$/.exec(url.pathname);
+  if (req.method !== "POST" || !match) return false;
+  if (!SCOPES.includes("images")) return send(res, 403, { error: "This token doesn't have the images scope" }), true;
+  const scene = SCENES.find((s) => s.id === Number(match[1]));
+  if (!scene) return send(res, 404, { error: "Not found" }), true;
+  if (failFirst > 0) {
+    failFirst -= 1;
+    return send(res, 503, { error: "Service unavailable (fake)" }), true;
+  }
+  const file = fileField(req.headers["content-type"], body);
+  if (!file) return send(res, 400, { error: "No file field" }), true;
+  if (file.content.length > 20 * 1024 * 1024) return send(res, 413, { error: "Over 20 MB" }), true;
+  const type = imageType(file.content);
+  if (!type) return send(res, 422, { error: "That isn't a PNG, JPEG or WebP image" }), true;
+  const takenAt = formField(req.headers["content-type"], body, "taken_at")?.content.toString("utf8");
+  if (takenAt && Number.isNaN(Date.parse(takenAt))) return send(res, 422, { error: "taken_at isn't a time" }), true;
+  const key = `${scene.id}:${createHash("sha256").update(file.content).digest("hex")}`;
+  if (sceneImages.has(key)) return send(res, 200, sceneImages.get(key)), true;
+  const id = nextId++;
+  const image = {
+    id, scene: { id: scene.id, name: scene.name, url: scene.url },
+    url: `${base}/images/${id}`, preview_url: `${base}/images/${id}/preview`,
+    content_type: type, byte_size: file.content.length, created_at: new Date().toISOString(),
+  };
+  console.log(`  ${file.filename}, ${file.content.length} bytes, taken_at ${takenAt}`);
+  sceneImages.set(key, image);
+  scene.images += 1;
+  send(res, 201, image);
+  return true;
 }
 
 createServer((req, res) => {
@@ -67,6 +130,7 @@ createServer((req, res) => {
         token: { name: "fake", scopes: SCOPES, expires_at: null },
       });
     }
+    if (scenesApi(req, res, body)) return;
     const endpoint = ENDPOINTS[req.url];
     if (req.method !== "POST" || !endpoint) {
       res.writeHead(404, { "Content-Type": "text/html" });

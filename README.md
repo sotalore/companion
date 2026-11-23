@@ -45,3 +45,29 @@ cd src-tauri && cargo test      # unit tests; one uses the real Credential Manag
 real one: `201` for a new file, `200` for a repeat, `422` for a wrong type. `FAIL_FIRST=2` makes the first two
 uploads fail with `503`, so you can watch the retries, and `SCOPES=read` gives a token without `upload`. In the
 app, set the site to `http://localhost:4567` and paste `slt_fake`.
+
+## Phase 3: screenshots to the scene's gallery
+
+The app watches the game's screenshot folder (`Pictures\SotA` for the regular client, `Pictures\SotA\DEV` for the
+QA client; a setting). When a new screenshot appears (F11 in game; F10 hides the interface first), the app:
+
+1. waits until the image is completely written;
+2. takes its time from the file itself, and finds the scene the player was in then. `sl-admin` 0.16.0 and later
+   write `sotalore-current-scene.json` to the `Lua/` folder on every scene change, and the app records each change
+   as it happens (sladmin's `EXPORT-FORMAT.md`, "The current scene"). A screenshot taken while loading or logged
+   out belongs to no scene;
+3. looks that scene up on the site by its game name (`GET /api/v1/scenes?game_name=`);
+4. lists the screenshot in the window, with a thumbnail and the scene it would go to. **Nothing is sent until you
+   press Send**, because a sent screenshot goes live in the gallery at once. You can choose another scene by name,
+   or Skip. Skipping never touches the file.
+
+The tray icon's tooltip says how many screenshots are waiting; the window never pops up over the game. Waiting
+screenshots are kept across restarts (`screenshots.json` in the app's data folder).
+
+- **Token scopes:** `upload` for exports, `read` to find scenes, and `images` to send screenshots. A token can't
+  gain a scope, so make a new one with all three and paste it in: it replaces the saved one. The window says which
+  scope is missing.
+- Match the clients: the Lua folder and the screenshot folder should be the same client's (the window warns
+  if they look different).
+- The fake API (`npm run fake-api`) has three scenes: Owl's Head (`OwlsHead_01`), Novia (`Novia`), and West
+  Ravenswood with no game name. `SCOPES=upload,images` makes a token without `read`.

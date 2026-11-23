@@ -55,3 +55,17 @@ td.muted, .muted { color: var(--muted); }
 #activity .tag.failed { color: var(--bad); }
 #activity .tag.skipped { color: var(--muted); }
 #activity .msg { display: block; color: var(--muted); }
+
+.warn { color: var(--warn); }
+.shot { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.shot img { width: 160px; height: 90px; object-fit: cover; border-radius: 4px; background: var(--bg); flex: none; }
+.shot .body { flex: 1; min-width: 0; }
+.shot .tag { font-size: 11px; padding: 0 5px; border-radius: 3px; margin-right: 6px; background: var(--line); }
+.shot .tag.sent, .shot .tag.already { color: var(--ok); }
+.shot .tag.sending, .shot .tag.retrying, .shot .tag.waiting { color: var(--warn); }
+.shot .tag.failed { color: var(--bad); }
+.shot.skipped, .shot.sent, .shot.already { opacity: .6; }
+.shot.skipped img, .shot.sent img, .shot.already img { width: 80px; height: 45px; }
+button.send { border-color: var(--accent); color: var(--accent); }
+.chooser { margin-top: 6px; }
+.chooser .results { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 6px; }

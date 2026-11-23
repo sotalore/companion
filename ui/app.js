@@ -59,19 +59,39 @@ function draw(state) {
   // Settings: fill the form once, so a redraw doesn't wipe what's being typed.
   if (!settingsDrawn) {
     $("lua-folder").value = state.settings.lua_folder ?? "";
+    $("shot-folder").value = state.settings.screenshot_folder ?? "";
     $("site-url").value = state.settings.site_url;
     $("auto-upload").checked = state.settings.auto_upload;
-    const presets = $("lua-presets");
-    presets.replaceChildren(
-      ...state.lua_folders
+    const presets = (list, input) =>
+      list
         .filter((f) => f.exists)
-        .map((f) => el("button", { type: "button", onclick: () => ($("lua-folder").value = f.path) }, f.label)),
-    );
+        .map((f) => el("button", { type: "button", onclick: () => ($(input).value = f.path) }, f.label));
+    $("lua-presets").replaceChildren(...presets(state.lua_folders, "lua-folder"));
+    $("shot-presets").replaceChildren(...presets(state.screenshot_folders, "shot-folder"));
     settingsDrawn = true;
   }
-  $("watching").textContent = state.watching
-    ? `Watching ${state.watching} for new exports.`
-    : "Not watching: " + whyNotWatching(state);
+  $("client-mismatch").hidden = !state.client_mismatch;
+  $("client-mismatch").textContent = state.client_mismatch ?? "";
+  const watching = [];
+  watching.push(state.watching_lua
+    ? `Watching ${state.watching_lua} for scene changes` + (state.auto_uploading ? " and new exports." : ".")
+    : "Not watching the Lua folder: choose it above.");
+  if (state.watching_lua && !state.auto_uploading) watching.push("Exports aren't uploaded automatically: " + whyNoAutoUpload(state));
+  watching.push(state.watching_shots
+    ? `Watching ${state.watching_shots} for screenshots.`
+    : "Not watching for screenshots: choose the screenshot folder above.");
+  $("watching").textContent = watching.join(" ");
+
+  // Screenshots need `read` (to find scenes) and `images` (to send); say so before a send fails.
+  const missing = conn.state === "ok" ? ["read", "images"].filter((s) => !conn.scopes.includes(s)) : [];
+  $("shot-scopes").hidden = missing.length === 0;
+  $("shot-scopes").textContent = missing.length
+    ? `This token doesn't have ${missing.map((s) => "`" + s + "`").join(" or ")}, which screenshots need. ` +
+      "Make a new token at ADM → AI Access with upload, read and images, and paste it under Site: it replaces the saved one."
+    : "";
+
+  drawScene(state.current_scene);
+  drawShots(state.screenshots, state);
 
   // Files
   const rows = state.files.map((f) => {
@@ -106,12 +126,129 @@ function draw(state) {
   $("activity").replaceChildren(...lines);
 }
 
-function whyNotWatching(state) {
-  if (!state.settings.lua_folder) return "choose the game's Lua folder.";
-  if (!state.settings.auto_upload) return "automatic uploads are off. Use the Upload buttons.";
+function whyNoAutoUpload(state) {
+  if (!state.settings.auto_upload) return "automatic uploads are off; use the Upload buttons.";
   if (!state.has_token) return "add an API token.";
-  if (["bad_token", "no_upload_scope"].includes(state.connection.state)) return "the token can't upload.";
-  return "the Lua folder can't be watched.";
+  if (state.connection.state === "bad_token") return "the site refused the token.";
+  return "the token doesn't have the upload scope.";
+}
+
+// Seconds since 1970 → local time, e.g. "Nov 23, 11:58".
+function localTime(seconds) {
+  return new Date(seconds * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function sceneText(scene) {
+  let text = `${scene.name ?? scene.raw_name} (${scene.raw_name})`;
+  if (scene.dungeon_owner) text += `, in ${scene.dungeon_owner}'s ${scene.dungeon_name ? `"${scene.dungeon_name}"` : "dungeon"}`;
+  if (scene.character) text += ` · ${scene.character}`;
+  return text;
+}
+
+function drawScene(scene) {
+  const line = $("current-scene");
+  if (!scene) {
+    line.className = "status warn";
+    line.textContent = "No scene yet: sl-admin 0.16.0 or later writes it to the Lua folder when you change scenes.";
+  } else if (scene.state === "inScene") {
+    line.className = "status ok";
+    line.textContent = `Now in ${sceneText(scene)}, since ${localTime(scene.entered_at)}${scene.exact ? "" : " or earlier"}.`;
+  } else {
+    line.className = "status";
+    line.textContent = (scene.state === "loading" ? "Loading a scene" : "Logged out") + `, since ${localTime(scene.entered_at)}.`;
+  }
+}
+
+// The screenshot cards, keyed by path, so a redraw keeps each card's image and any open scene search.
+const cards = new Map();
+const OPEN = ["waiting", "failed", "sending", "retrying"];
+
+function drawShots(shots, state) {
+  // Everything still open, and the last few finished.
+  const shown = [...shots.filter((s) => OPEN.includes(s.status)), ...shots.filter((s) => !OPEN.includes(s.status)).slice(0, 5)];
+  const keep = new Set(shown.map((s) => s.path));
+  for (const [path, card] of cards) {
+    if (!keep.has(path)) { card.root.remove(); cards.delete(path); }
+  }
+  const list = $("shots");
+  shown.forEach((shot, i) => {
+    let card = cards.get(shot.path);
+    if (!card) { card = makeCard(shot); cards.set(shot.path, card); }
+    updateCard(card, shot, state);
+    if (list.children[i] !== card.root) list.insertBefore(card.root, list.children[i] ?? null);
+  });
+  if (shown.length === 0) {
+    if (!$("no-shots")) list.append(el("p", { id: "no-shots", class: "muted" }, "No new screenshots. F11 in game takes one (F10 hides the interface first)."));
+  } else {
+    $("no-shots")?.remove();
+  }
+}
+
+function makeCard(shot) {
+  const img = el("img", { src: window.__TAURI__.core.convertFileSrc(shot.path), alt: shot.file, loading: "lazy" });
+  const info = el("div", { class: "info" });
+  const actions = el("div", { class: "row" });
+  const chooser = el("div", { class: "chooser", hidden: "" });
+  const root = el("div", { class: "shot" }, img, el("div", { class: "body" }, info, actions, chooser));
+  return { root, info, actions, chooser, img };
+}
+
+function updateCard(card, shot, state) {
+  card.root.className = "shot " + shot.status;
+  const taken = new Date(shot.taken_at).toLocaleString();
+  const lines = [el("div", {}, el("span", { class: "tag " + shot.status }, shot.status), shot.file, el("span", { class: "muted" }, " · " + taken))];
+  lines.push(el("div", {}, "Scene: ", shot.scene ? sceneText(shot.scene) : el("span", { class: "muted" }, "none")));
+  if (shot.scene_note) lines.push(el("div", { class: "muted" }, shot.scene_note));
+  if (shot.site_scene) {
+    const s = shot.site_scene;
+    const where = [s.region, s.level].filter(Boolean).join(", ");
+    lines.push(el("div", {}, "On the site: ", s.url ? reviewLink(s.url, s.name) : s.name, where ? el("span", { class: "muted" }, ` (${where})`) : null));
+  } else if (shot.site_note) {
+    lines.push(el("div", { class: "warn" }, shot.site_note));
+  }
+  if (shot.message) lines.push(el("div", { class: "muted" }, shot.message, shot.image_url ? " " : null, shot.image_url ? reviewLink(shot.image_url, "See it") : null));
+  card.info.replaceChildren(...lines);
+
+  const open = ["waiting", "failed"].includes(shot.status);
+  const buttons = [];
+  if (open && shot.site_scene) {
+    buttons.push(el("button", { class: "send", onclick: () => run("send_screenshot", { path: shot.path, scene: shot.site_scene }) }, `Send to ${shot.site_scene.name}`));
+  }
+  if (open) {
+    buttons.push(el("button", { onclick: () => toggleChooser(card, shot) }, shot.site_scene ? "Another scene..." : "Choose a scene..."));
+    buttons.push(el("button", { onclick: () => run("skip_screenshot", { path: shot.path }) }, "Skip"));
+  }
+  card.actions.replaceChildren(...buttons);
+  if (!open) card.chooser.hidden = true;
+}
+
+// A search box for choosing the site scene by name; each result is a Send button for that scene.
+function toggleChooser(card, shot) {
+  const box = card.chooser;
+  if (!box.hidden) { box.hidden = true; return; }
+  const input = el("input", { type: "text", placeholder: "Scene name...", value: shot.scene?.name ?? "" });
+  const results = el("div", { class: "results" });
+  const search = async () => {
+    results.replaceChildren(el("span", { class: "muted" }, "Searching..."));
+    let scenes;
+    try {
+      scenes = await run("search_scenes", { query: input.value });
+    } catch (err) {
+      results.replaceChildren(el("span", { class: "error" }, String(err)));
+      return;
+    }
+    results.replaceChildren(
+      ...(scenes.length ? scenes.map((s) => {
+        const where = [s.region, s.level].filter(Boolean).join(", ");
+        return el("button", { onclick: () => { box.hidden = true; run("send_screenshot", { path: shot.path, scene: s }); } },
+          `Send to ${s.name}${where ? ` (${where})` : ""}`);
+      }) : [el("span", { class: "muted" }, "No scene with that in its name.")]),
+    );
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
+  box.replaceChildren(el("div", { class: "row" }, input, el("button", { onclick: search }, "Search")), results);
+  box.hidden = false;
+  input.focus();
 }
 
 async function refresh() {
@@ -130,6 +267,7 @@ $("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   await run("save_settings", {
     luaFolder: $("lua-folder").value,
+    screenshotFolder: $("shot-folder").value,
     siteUrl: $("site-url").value,
     autoUpload: $("auto-upload").checked,
   });

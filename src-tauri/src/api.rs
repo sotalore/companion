@@ -1,11 +1,15 @@
-//! The site API, as `sotalore/sotalore`'s `docs/api.md` describes it. We use two endpoints:
-//! `GET /api/v1/me` (does the token work, and does it have `upload`?) and the three upload endpoints.
+//! The site API, as `sotalore/sotalore`'s `docs/api.md` describes it. We use:
+//! - `GET /api/v1/me`: does the token work, and which scopes does it have?
+//! - the three export uploads (scope `upload`);
+//! - `GET /scenes` (scope `read`) and `POST /scenes/:id/images` (scope `images`) for screenshots.
 //!
 //! Retry rules (from CLAUDE.md and the contract): the API answers a repeated file with the first
-//! import (`200`), so retrying an upload is safe. We retry network errors and 5xx with backoff, and never
-//! retry a 4xx: then the file or the request is the problem, and the user needs to see the message.
+//! import, and a repeated image with the first image (`200`), so retrying a send is safe. We retry
+//! network errors and 5xx with backoff, and never retry a 4xx: then the file or the request is the
+//! problem, and the user needs to see the message.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::future::Future;
 use std::time::Duration;
 
 /// How long to wait before each retry. Five retries after the first try, about a minute in all.
@@ -66,9 +70,64 @@ pub struct TokenInfo {
     pub expires_at: Option<String>,
 }
 
-impl Me {
-    pub fn can_upload(&self) -> bool {
-        self.token.scopes.iter().any(|s| s == "upload")
+/// A scene on the site (`GET /scenes`). Only what the companion shows; other fields are skipped.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SiteScene {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub game_name: Option<String>,
+    #[serde(default, deserialize_with = "lenient_text")]
+    pub region: Option<String>,
+    #[serde(default, deserialize_with = "lenient_text")]
+    pub level: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// Reads a field as text whatever JSON type it comes as (a string, a number...), or `None` for null.
+/// Only used for fields we just display, so a type we didn't expect can't break the scene list.
+fn lenient_text<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s),
+        other => Some(other.to_string()),
+    })
+}
+
+/// An image added to a scene's gallery (`POST /scenes/:id/images`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneImage {
+    /// `true` for `201 Created`; `false` for `200 OK`, the scene already had these exact bytes.
+    pub created: bool,
+    /// The full image's link.
+    pub url: Option<String>,
+    /// The scene's page on the site.
+    pub scene_url: Option<String>,
+}
+
+/// Runs `attempt` until it works, retrying network errors and 5xx after each of `delays`. Any other
+/// error comes back at once. `on_retry` is called before each wait, so the UI can say so.
+/// `attempt` is a closure that makes a fresh request each time, like a Ruby block called in a loop.
+pub async fn with_retries<T, Fut>(
+    delays: &[Duration],
+    mut on_retry: impl FnMut(&ApiError, Duration),
+    mut attempt: impl FnMut() -> Fut,
+) -> Result<T, ApiError>
+where
+    Fut: Future<Output = Result<T, ApiError>>,
+{
+    let mut tries = 0;
+    loop {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(err) if err.is_retryable() && tries < delays.len() => {
+                on_retry(&err, delays[tries]);
+                tokio::time::sleep(delays[tries]).await;
+                tries += 1;
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 
@@ -140,28 +199,96 @@ impl Client {
         Ok(parse_import(status, &body))
     }
 
-    /// An upload with retries: network errors and 5xx are tried again after each of `delays`; any
-    /// other error comes back at once. `on_retry` is called before each wait, so the UI can say so.
+    /// An upload with retries (see `with_retries`).
     pub async fn upload(
         &self,
         endpoint: &str,
         filename: &str,
         bytes: &[u8],
         delays: &[Duration],
-        mut on_retry: impl FnMut(&ApiError, Duration),
+        on_retry: impl FnMut(&ApiError, Duration),
     ) -> Result<Uploaded, ApiError> {
-        let mut attempt = 0;
-        loop {
-            match self.upload_once(endpoint, filename, bytes.to_vec()).await {
-                Ok(uploaded) => return Ok(uploaded),
-                Err(err) if err.is_retryable() && attempt < delays.len() => {
-                    on_retry(&err, delays[attempt]);
-                    tokio::time::sleep(delays[attempt]).await;
-                    attempt += 1;
-                }
-                Err(err) => return Err(err),
-            }
+        with_retries(delays, on_retry, || self.upload_once(endpoint, filename, bytes.to_vec())).await
+    }
+
+    /// `GET /scenes`, by the game's internal name (`game_name`, exact) or a name search (`q`).
+    /// Only the first page (up to 100): one exact match, or enough to pick from. Not retried.
+    pub async fn scenes(&self, param: &str, value: &str) -> Result<Vec<SiteScene>, ApiError> {
+        #[derive(Deserialize)]
+        struct Page {
+            scenes: Vec<SiteScene>,
         }
+        let response = self
+            .http
+            .get(format!("{}/scenes", self.api_base))
+            .query(&[(param, value), ("per", "100")])
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let body = check_status(response).await?;
+        serde_json::from_str::<Page>(&body)
+            .map(|page| page.scenes)
+            .map_err(|e| ApiError::Status { status: 200, message: format!("unexpected answer from /scenes: {e}") })
+    }
+
+    /// One try at adding an image to a scene's gallery. `taken_at` is ISO 8601 with an offset.
+    pub async fn add_scene_image_once(
+        &self,
+        scene_id: i64,
+        filename: &str,
+        bytes: Vec<u8>,
+        taken_at: &str,
+    ) -> Result<SceneImage, ApiError> {
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(filename.to_string())
+            .mime_str(image_mime(filename))
+            .expect("image MIME types are valid");
+        let form = reqwest::multipart::Form::new().part("file", part).text("taken_at", taken_at.to_string());
+        let response = self
+            .http
+            .post(format!("{}/scenes/{scene_id}/images", self.api_base))
+            .bearer_auth(&self.token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status().as_u16();
+        let body = check_status(response).await?;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        let text = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str()).map(String::from);
+        Ok(SceneImage {
+            created: status == 201,
+            url: text(json.get("url")),
+            scene_url: text(json.get("scene").and_then(|s| s.get("url"))),
+        })
+    }
+
+    /// Adds an image with retries (see `with_retries`). A repeat is a `200`, so retrying is safe.
+    pub async fn add_scene_image(
+        &self,
+        scene_id: i64,
+        filename: &str,
+        bytes: &[u8],
+        taken_at: &str,
+        delays: &[Duration],
+        on_retry: impl FnMut(&ApiError, Duration),
+    ) -> Result<SceneImage, ApiError> {
+        with_retries(delays, on_retry, || self.add_scene_image_once(scene_id, filename, bytes.to_vec(), taken_at))
+            .await
+    }
+}
+
+/// The MIME type for an image file, from its extension. The site works the type out from the bytes
+/// anyway; this is only the label on the upload.
+fn image_mime(filename: &str) -> &'static str {
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/png"
     }
 }
 
@@ -237,7 +364,7 @@ mod tests {
             .await;
         let me = Client::new(&server.url(), "slt_test").me().await.unwrap();
         assert_eq!(me.account.name, "Companion");
-        assert!(me.can_upload());
+        assert_eq!(me.token.scopes, vec!["upload"]);
         mock.assert_async().await;
     }
 
@@ -365,6 +492,61 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, ApiError::Status { status: 500, message: "Internal Server Error".into() });
         mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn finds_scenes_by_game_name() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/api/v1/scenes")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("game_name".into(), "OwlsHead_01".into()),
+                Matcher::UrlEncoded("per".into(), "100".into()),
+            ]))
+            .with_body(r#"{ "scenes": [ { "id": 41, "name": "Owl's Head", "game_name": "OwlsHead_01",
+                "region": "Novia", "scene_type": "town", "level": 2, "level_plus": false, "parent": null,
+                "images": 3, "url": "https://example.test/scenes/41" } ],
+                "page": { "number": 1, "per": 100, "total_count": 1, "total_pages": 1 } }"#)
+            .create_async()
+            .await;
+        let scenes = Client::new(&server.url(), "t").scenes("game_name", "OwlsHead_01").await.unwrap();
+        assert_eq!(scenes.len(), 1);
+        assert_eq!(scenes[0].id, 41);
+        assert_eq!(scenes[0].level.as_deref(), Some("2")); // a number, read as text
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn adds_an_image_with_its_time_and_retries_a_5xx() {
+        let mut server = mockito::Server::new_async().await;
+        let failing = server.mock("POST", "/api/v1/scenes/41/images").with_status(502).expect(1).create_async().await;
+        let ok = server
+            .mock("POST", "/api/v1/scenes/41/images")
+            .match_body(Matcher::AllOf(vec![
+                Matcher::Regex(r#"name="file"; filename="SotA_11-23-26_12-00_1.png""#.into()),
+                Matcher::Regex(r"(?i)content-type: image/png".into()),
+                Matcher::Regex(r#"name="taken_at"\r\n\r\n2026-11-23T12:00:05-08:00"#.into()),
+            ]))
+            .with_status(201)
+            .with_body(r#"{ "id": 9, "scene": { "id": 41, "name": "Owl's Head", "url": "https://example.test/scenes/41" },
+                "url": "https://example.test/img/9", "preview_url": "https://example.test/img/9/p" }"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let image = Client::new(&server.url(), "t")
+            .add_scene_image(41, "SotA_11-23-26_12-00_1.png", b"png bytes", "2026-11-23T12:00:05-08:00", NO_WAIT, |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            image,
+            SceneImage {
+                created: true,
+                url: Some("https://example.test/img/9".into()),
+                scene_url: Some("https://example.test/scenes/41".into()),
+            }
+        );
+        failing.assert_async().await;
+        ok.assert_async().await;
     }
 
     #[tokio::test]

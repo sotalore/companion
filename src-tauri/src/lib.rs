@@ -8,12 +8,16 @@
 //! - `uploader`: the queue's worker, which reads, checks and uploads each file.
 //! - `api`: talks to the site (`GET /me`, the uploads), with the retry rules.
 //! - `history`: remembers what was uploaded.
+//! - `scenes`: the scene changes read from the plugin's current-scene file.
+//! - `screenshots`: new screenshots, matched to a scene, waiting for Darren to send or skip.
 //! - `state`, `commands`: what the window shows and the actions it can take.
 
 mod api;
 mod commands;
 mod exports;
 mod history;
+mod scenes;
+mod screenshots;
 mod secrets;
 mod settings;
 mod state;
@@ -33,14 +37,27 @@ pub fn run() {
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             let data_dir = app.path().app_data_dir()?;
-            // The queue between the watcher (and the Upload button) and the upload worker.
+            // The queues from the watchers (and the Upload button) to the two workers. A channel is
+            // a thread-safe queue: one end sends, the other waits for the next item.
             let (queue, jobs) = tokio::sync::mpsc::unbounded_channel();
-            app.manage(AppState::new(config_dir.join("settings.json"), data_dir.join("uploads.json"), queue));
+            let (shots_queue, new_shots) = tokio::sync::mpsc::unbounded_channel();
+            app.manage(AppState::new(config_dir.join("settings.json"), &data_dir, queue, shots_queue));
             uploader::start(app.handle().clone(), jobs);
+            screenshots::start(app.handle().clone(), new_shots);
 
             build_tray(app.handle())?;
 
-            // On start, check the token with the site; that also starts the watcher.
+            // Screenshots still waiting from last time: let the window show them, and say so on the tray.
+            let state = app.state::<AppState>();
+            let shots = state::lock(&state.shots);
+            for shot in &shots.list {
+                let _ = app.asset_protocol_scope().allow_file(&shot.path);
+            }
+            screenshots::update_tray(app.handle(), shots.waiting());
+            drop(shots);
+
+            // Start watching now (scene changes need no token), then check the token with the site.
+            state::refresh_watchers(app.handle());
             tauri::async_runtime::spawn(state::check_connection(app.handle().clone()));
             Ok(())
         })
@@ -59,6 +76,9 @@ pub fn run() {
             commands::check_connection,
             commands::upload_file,
             commands::open_url,
+            commands::send_screenshot,
+            commands::skip_screenshot,
+            commands::search_scenes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the companion");
