@@ -1,0 +1,32 @@
+[package]
+name = "sotalore-companion"
+version = "0.1.0"
+description = "SotA Lore companion"
+edition = "2021"
+publish = false
+
+[lib]
+name = "companion_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json", "multipart", "charset"] }
+tokio = { version = "1", features = ["time", "sync"] }
+sha2 = "0.11.1"
+hex = "0.4.3"
+chrono = { version = "0.4.45", features = ["clock"] }
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+notify-debouncer-full = "0.8"
+keyring = { version = "3", features = ["windows-native"] }
+
+[dev-dependencies]
+mockito = "1"
+tempfile = "3.27.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }

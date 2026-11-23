@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SotA Lore Companion</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>SotA Lore Companion</h1>
+    <span id="version"></span>
+  </header>
+
+  <section>
+    <h2>Site</h2>
+    <p id="connection" class="status"></p>
+    <form id="token-form">
+      <label for="token">API token</label>
+      <div class="row">
+        <input id="token" type="password" autocomplete="off" placeholder="slt_...">
+        <button type="submit">Save</button>
+        <button type="button" id="clear-token">Remove</button>
+        <button type="button" id="recheck">Check</button>
+      </div>
+      <p class="hint">Make one at ADM → AI Access, for an AI account, with the <code>upload</code> scope.
+        It's kept in Windows Credential Manager, never in a file.</p>
+    </form>
+  </section>
+
+  <section>
+    <h2>Settings</h2>
+    <form id="settings-form">
+      <label for="lua-folder">The game's Lua folder</label>
+      <input id="lua-folder" type="text" spellcheck="false">
+      <div class="row" id="lua-presets"></div>
+      <label for="site-url">Site</label>
+      <input id="site-url" type="text" spellcheck="false">
+      <label class="check"><input id="auto-upload" type="checkbox"> Upload new exports as the game writes them</label>
+      <div class="row"><button type="submit">Save settings</button></div>
+    </form>
+    <p id="watching" class="hint"></p>
+  </section>
+
+  <section>
+    <h2>Export files</h2>
+    <table>
+      <thead><tr><th>File</th><th>Type</th><th>Written</th><th>Uploaded</th><th></th></tr></thead>
+      <tbody id="files"></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Activity</h2>
+    <ul id="activity"></ul>
+  </section>
+
+  <p id="error" class="error" hidden></p>
+</body>
+</html>
