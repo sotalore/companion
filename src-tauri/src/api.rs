@@ -232,6 +232,20 @@ impl Client {
             .map_err(|e| ApiError::Status { status: 200, message: format!("unexpected answer from /scenes: {e}") })
     }
 
+    /// `GET /skills`: every skill the site knows, and its game school renames (scope `read`).
+    pub async fn skills(&self) -> Result<crate::skills::SiteSkills, ApiError> {
+        let response = self
+            .http
+            .get(format!("{}/skills", self.api_base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let body = check_status(response).await?;
+        serde_json::from_str(&body)
+            .map_err(|e| ApiError::Status { status: 200, message: format!("unexpected answer from /skills: {e}") })
+    }
+
     /// One try at adding an image to a scene's gallery. `taken_at` is ISO 8601 with an offset.
     pub async fn add_scene_image_once(
         &self,
@@ -547,6 +561,22 @@ mod tests {
         );
         failing.assert_async().await;
         ok.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn reads_the_sites_skills() {
+        let mut server = mockito::Server::new_async().await;
+        server
+            .mock("GET", "/api/v1/skills")
+            .match_header("authorization", "Bearer t")
+            .with_body(r#"{ "skills": [ { "id": 1, "key": "combat~blades~thrust", "name": "Thrust", "activity": "adventuring",
+                "category": "combat", "school": "blades", "xp_factor": 1.0, "game_id": 10, "game_key": "Thrust" } ],
+                "game_schools": { "moon": "lunar" } }"#)
+            .create_async()
+            .await;
+        let site = Client::new(&server.url(), "t").skills().await.unwrap();
+        assert_eq!(site.skills[0].game_id, Some(10));
+        assert_eq!(site.game_schools["moon"], "lunar");
     }
 
     #[tokio::test]

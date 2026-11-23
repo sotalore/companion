@@ -1,6 +1,7 @@
 // A stand-in for the site's API, for trying the companion without a real token or touching the site.
 // It answers GET /api/v1/me, the three upload endpoints, GET /scenes and POST /scenes/:id/images the
-// way sotalore/docs/api.md says, and keeps nothing on disk (images are counted, not stored).
+// way sotalore/docs/api.md says, and GET /skills (see siteSkills below). It keeps nothing on disk
+// (images are counted, not stored).
 //
 //   npm run fake-api                    # http://localhost:4567, token slt_fake (upload, read, images)
 //   FAIL_FIRST=2 npm run fake-api       # the first 2 uploads or images get a 503, to watch the retries
@@ -12,6 +13,7 @@
 
 import { createServer } from "node:http";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 const PORT = Number(process.env.PORT ?? 4567);
 const TOKEN = process.env.TOKEN ?? "slt_fake";
@@ -69,9 +71,54 @@ function imageType(b) {
   return null;
 }
 
+// GET /api/v1/skills: the site's skills, built from a game-skills file the way `rails skills:sync`
+// would (SKILLS_FILE, by default the regular client's), then put out of step with the game on
+// purpose unless SKILLS_DRIFT=0: one skill renamed, one with another XP factor, one in another
+// school, one missing (so "new in the game"), one the game no longer has, and one with no game id.
+function siteSkills() {
+  const file = process.env.SKILLS_FILE ??
+    `${process.env.APPDATA}/Catnip Games/Shroud of the Avatar/Lua/sotalore-game-skills.json`;
+  let game = [];
+  try {
+    game = JSON.parse(readFileSync(file, "utf8")).skills;
+  } catch {
+    console.log(`  (no game-skills file at ${file}: the site has no skills)`);
+  }
+  const SCHOOLS = { polearms: "polearm", moon: "lunar" };
+  const param = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  let skills = game.map((g, i) => {
+    const category = g.subcategory.toLowerCase();
+    const school = SCHOOLS[g.school.toLowerCase()] ?? g.school.toLowerCase();
+    return {
+      id: i + 1, key: `${category}~${param(school)}~${param(g.name)}`, name: g.name,
+      activity: ["combat", "magic", "strategy"].includes(category) ? "adventuring" : "crafting",
+      category, school, xp_factor: Number(g.xpMultiplier), game_id: g.id, game_key: g.key,
+    };
+  });
+  if (process.env.SKILLS_DRIFT !== "0" && skills.length > 5) {
+    skills[0].name = skills[0].name + " (old name)";
+    skills[1].xp_factor = skills[1].xp_factor * 2;
+    skills[2].school = "an-old-school";
+    skills.splice(3, 1);
+    skills.push({ id: 9001, key: "magic~life~life-warding", name: "Life Warding", activity: "adventuring",
+      category: "magic", school: "life", xp_factor: 1, game_id: 3757, game_key: "LifeWarding" });
+    skills.push({ id: 9002, key: "combat~blades~hand-made", name: "Hand Made", activity: "adventuring",
+      category: "combat", school: "blades", xp_factor: 1, game_id: null, game_key: null });
+  }
+  return { skills, game_schools: SCHOOLS };
+}
+
 // GET /api/v1/scenes and POST /api/v1/scenes/:id/images. Returns true if it answered.
 function scenesApi(req, res, body) {
   const url = new URL(req.url, base);
+  if (req.method === "GET" && url.pathname === "/api/v1/skills") {
+    if (!SCOPES.includes("read")) return send(res, 403, { error: "This token doesn't have the read scope" }), true;
+    const body = siteSkills();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(body));
+    console.log(`  -> 200 (${body.skills.length} skills)`);
+    return true;
+  }
   if (req.method === "GET" && url.pathname === "/api/v1/scenes") {
     if (!SCOPES.includes("read")) return send(res, 403, { error: "This token doesn't have the read scope" }), true;
     const p = url.searchParams;

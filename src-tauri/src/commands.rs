@@ -37,6 +37,8 @@ pub struct StateView {
     files: Vec<FileView>,
     activity: Vec<Activity>,
     screenshots: Vec<Shot>,
+    /// The last comparison of the game's skills with the site's.
+    skills: state::SkillsCheck,
 }
 
 #[derive(Serialize)]
@@ -87,6 +89,7 @@ pub fn get_state(state: State<'_, AppState>) -> StateView {
         files: list_files(&state, &settings),
         activity: lock(&state.activity).iter().cloned().collect(),
         screenshots: lock(&state.shots).list.clone(),
+        skills: lock(&state.skills).clone(),
         settings,
     }
 }
@@ -186,6 +189,12 @@ pub fn skip_screenshot(app: AppHandle, path: PathBuf) -> Result<(), String> {
     screenshots::skip(&app, &path)?;
     state::notify_ui(&app);
     Ok(())
+}
+
+/// Check skills: compare the game-skills file in the Lua folder with the site's skills. Only reads.
+#[tauri::command]
+pub async fn check_skills(app: AppHandle) {
+    state::check_skills(app, None).await;
 }
 
 /// Searches the site's scenes by name, to choose one for a screenshot (`GET /scenes?q=`).

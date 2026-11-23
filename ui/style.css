@@ -69,3 +69,11 @@ td.muted, .muted { color: var(--muted); }
 button.send { border-color: var(--accent); color: var(--accent); }
 .chooser { margin-top: 6px; }
 .chooser .results { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 6px; }
+.status-row { align-items: center; justify-content: space-between; margin-top: 0; }
+.status-row .status { margin: 0; flex: 1; }
+details { margin: 6px 0; font-size: 13px; }
+summary { cursor: pointer; color: var(--accent); }
+ul.skills { margin: 4px 0 0; padding-left: 18px; }
+ul.skills li { margin: 3px 0; }
+textarea { width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; font: 12px/1.4 Consolas, monospace; padding: 6px; }

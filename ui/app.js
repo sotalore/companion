@@ -90,6 +90,7 @@ function draw(state) {
       "Make a new token at ADM → AI Access with upload, read and images, and paste it under Site: it replaces the saved one."
     : "";
 
+  drawSkills(state.skills);
   drawScene(state.current_scene);
   drawShots(state.screenshots, state);
 
@@ -157,6 +158,53 @@ function drawScene(scene) {
     line.className = "status";
     line.textContent = (scene.state === "loading" ? "Loading a scene" : "Logged out") + `, since ${localTime(scene.entered_at)}.`;
   }
+}
+
+// The skills check: a status line, then each kind of difference, then the issue text to copy.
+let skillsDrawnFor = null; // redraw the report only when it changes, so a copy in progress isn't wiped
+
+function drawSkills(check) {
+  const status = $("skills-status");
+  const r = check.report;
+  status.className = "status " + ({ done: r?.in_step ? "ok" : "warn", failed: "bad" }[check.status] ?? "");
+  status.textContent = check.message || "Not checked yet.";
+  $("check-skills").disabled = check.status === "checking";
+
+  const key = r ? r.checked_at + r.file : null;
+  if (key === skillsDrawnFor) return;
+  skillsDrawnFor = key;
+  const box = $("skills-report");
+  if (!r) { box.replaceChildren(); return; }
+  const parts = [el("p", { class: "hint" },
+    `${r.file} (sl-admin ${r.plugin_version ?? "?"}, game API ${r.api_version ?? "?"}): ${r.game_count} skills in the game, ` +
+    `${r.site_count} on the site. Checked ${r.checked_at}.`)];
+  const sections = [
+    ["New in the game", r.added], ["Changed", r.changed], ["Moved school or category", r.moved],
+    ["Gone from the game", r.removed], ["On the site with no game id", r.unlinked],
+  ];
+  for (const [title, lines] of sections) {
+    if (!lines.length) continue;
+    parts.push(el("details", { open: "" },
+      el("summary", {}, `${title} (${lines.length})`),
+      el("ul", { class: "skills" }, ...lines.map((l) =>
+        el("li", {}, el("strong", {}, l.name), l.game_id != null ? el("span", { class: "muted" }, ` #${l.game_id}`) : null,
+          el("span", { class: "muted" }, ` · ${l.place}`), el("div", {}, l.details.join("; ")))))));
+  }
+  if (r.issue_text) {
+    const text = el("textarea", { readonly: "", rows: "8" });
+    text.value = r.issue_text;
+    const copy = el("button", { type: "button", onclick: async () => {
+      try {
+        await navigator.clipboard.writeText(r.issue_text);
+        copy.textContent = "Copied";
+      } catch {
+        text.select(); // the clipboard isn't available: select it for Ctrl+C
+        copy.textContent = "Press Ctrl+C";
+      }
+    } }, "Copy issue text");
+    parts.push(el("label", {}, "For an issue in sotalore/sotalore:"), text, el("div", { class: "row" }, copy));
+  }
+  box.replaceChildren(...parts);
 }
 
 // The screenshot cards, keyed by path, so a redraw keeps each card's image and any open scene search.
@@ -262,6 +310,7 @@ $("token-form").addEventListener("submit", async (e) => {
 });
 $("clear-token").addEventListener("click", () => run("clear_token"));
 $("recheck").addEventListener("click", () => run("check_connection"));
+$("check-skills").addEventListener("click", () => run("check_skills"));
 
 $("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();

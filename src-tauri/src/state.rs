@@ -13,6 +13,7 @@ use crate::scenes::{self, Timeline};
 use crate::screenshots::{self, Shots};
 use crate::secrets;
 use crate::settings::Settings;
+use crate::skills;
 use crate::watcher::{self, FolderWatcher, Job};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -71,6 +72,8 @@ pub struct AppState {
     /// Site scenes found by game name (`None`: the site has none with that name). Like a Ruby Hash
     /// used as a cache.
     pub site_scenes: Mutex<HashMap<String, Option<SiteScene>>>,
+    /// The last comparison of the game's skills with the site's.
+    pub skills: Mutex<SkillsCheck>,
     lua_watcher: Mutex<Watching>,
     shots_watcher: Mutex<Watching>,
     /// Export files for the upload worker.
@@ -106,6 +109,7 @@ impl AppState {
             timeline: Mutex::new(Timeline::default()),
             shots: Mutex::new(Shots::load(&data_dir.join("screenshots.json"))),
             site_scenes: Mutex::new(HashMap::new()),
+            skills: Mutex::new(SkillsCheck { status: "unchecked", message: String::new(), report: None }),
             lua_watcher: Mutex::new(None),
             shots_watcher: Mutex::new(None),
             queue,
@@ -219,19 +223,27 @@ fn restart(
     }
 }
 
-/// Files changed in the `Lua/` folder (on the watcher's thread). The current-scene file is recorded
-/// at once, here, so a screenshot is never matched before its scene change is known; exports go to
-/// the upload queue, whose worker can be busy retrying for a minute.
+/// Files changed in the `Lua/` folder (on the watcher's thread), sent on by their `type`:
+/// - `currentScene`: recorded at once, here, so a screenshot is never matched before its scene
+///   change is known;
+/// - `gameSkills`: compared with the site's skills (a read, in the background);
+/// - anything else: to the upload queue, whose worker can be busy retrying for a minute. It checks
+///   the type again and uploads only the types the site takes.
 fn lua_files_changed(app: &AppHandle, files: Vec<PathBuf>) {
     let state = app.state::<AppState>();
     for path in files {
-        match read_scene_file(&path) {
-            Some(entry) => {
-                if lock(&state.timeline).record(entry) {
-                    notify_ui(app);
+        match read_typed(&path) {
+            Some((t, bytes)) if t == "currentScene" => {
+                if let Some(entry) = scenes::parse(&bytes) {
+                    if lock(&state.timeline).record(entry) {
+                        notify_ui(app);
+                    }
                 }
             }
-            None => {
+            Some((t, _)) if t == "gameSkills" => {
+                tauri::async_runtime::spawn(check_skills(app.clone(), Some(path)));
+            }
+            _ => {
                 if state.may_auto_upload() {
                     let _ = state.queue.send(Job { path, manual: false });
                 }
@@ -240,28 +252,85 @@ fn lua_files_changed(app: &AppHandle, files: Vec<PathBuf>) {
     }
 }
 
-/// Reads a file as the current-scene file, trying again briefly if it's caught half-written.
-/// `None` if it's another kind of file (or can't be read).
-fn read_scene_file(path: &Path) -> Option<scenes::SceneEntry> {
+/// Reads a file and its `type`, trying again briefly if it's caught half-written. `None` if it has
+/// no type, or still isn't valid JSON (the upload worker will say so if it's an export).
+fn read_typed(path: &Path) -> Option<(String, Vec<u8>)> {
     for _ in 0..3 {
         let bytes = std::fs::read(path).ok()?;
         match exports::read_header(&bytes) {
-            Ok(header) if header.file_type.as_deref() == Some("currentScene") => return scenes::parse(&bytes),
-            Ok(_) => return None, // complete, and not the scene file
+            Ok(header) => return header.file_type.map(|t| (t, bytes)),
             Err(_) => std::thread::sleep(Duration::from_millis(300)), // maybe half-written
         }
     }
     None
 }
 
+/// The file of a given `type` in the Lua folder, if there is one (found by type, never by name).
+fn find_typed(folder: &Path, file_type: &str) -> Option<(PathBuf, Vec<u8>)> {
+    let entries = std::fs::read_dir(folder).ok()?;
+    entries.flatten().map(|e| e.path()).filter(|p| exports::is_candidate(p)).find_map(|path| {
+        let (t, bytes) = read_typed(&path)?;
+        (t == file_type).then_some((path, bytes))
+    })
+}
+
 /// On start (or a new Lua folder), records the scene the player is in now, from the file as it is.
 fn seed_scene(app: &AppHandle, folder: &Path) {
-    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    if let Some(entry) = find_typed(folder, "currentScene").and_then(|(_, bytes)| scenes::parse(&bytes)) {
+        lock(&app.state::<AppState>().timeline).record(entry);
+    }
+}
+
+/// The skills check as the window shows it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillsCheck {
+    /// `unchecked`, `checking`, `done` or `failed`.
+    pub status: &'static str,
+    pub message: String,
+    pub report: Option<skills::Report>,
+}
+
+/// Compares the game-skills file with the site's skills (`GET /skills`) and keeps the report for the
+/// window. `path`: the file that just changed; `None` looks for it in the Lua folder. Only reads.
+pub async fn check_skills(app: AppHandle, path: Option<PathBuf>) {
     let state = app.state::<AppState>();
-    for path in entries.flatten().map(|e| e.path()).filter(|p| exports::is_candidate(p)) {
-        if let Some(entry) = read_scene_file(&path) {
-            lock(&state.timeline).record(entry);
+    let set = |status, message: String, report| {
+        *lock(&state.skills) = SkillsCheck { status, message, report };
+        notify_ui(&app);
+    };
+    let settings = state.settings();
+    let found = match path {
+        Some(path) => std::fs::read(&path).ok().map(|bytes| (path, bytes)),
+        None => settings.lua_folder.as_deref().and_then(|folder| find_typed(folder, "gameSkills")),
+    };
+    let Some((path, bytes)) = found else {
+        return set("unchecked", "No game-skills file in the Lua folder yet: run /sladmin gameskills in game.".into(), None);
+    };
+    let Some(file) = skills::parse_file(&bytes) else {
+        return set("failed", format!("{} isn't a complete game-skills file.", path.display()), None);
+    };
+    let site = settings.site().to_string();
+    let Ok(Some(token)) = secrets::get_token(&site) else {
+        return set("unchecked", "Add an API token (with the read scope) to compare with the site.".into(), None);
+    };
+    // Keep the last report on screen while checking again.
+    let previous = lock(&state.skills).report.clone();
+    set("checking", "Comparing with the site...".into(), previous);
+    match Client::new(&site, &token).skills().await {
+        Ok(site_skills) => {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let report = skills::compare(&file, &name, &site_skills, &now());
+            let message = if report.in_step {
+                format!("In step: all {} skills in the game match the site.", report.game_count)
+            } else {
+                "The site's skills differ from the game's: see below.".to_string()
+            };
+            set("done", message, Some(report));
         }
+        Err(ApiError::Status { status: 403, message }) => {
+            set("failed", format!("The site refused ({message}): the token needs the `read` scope."), None)
+        }
+        Err(e) => set("failed", format!("Couldn't get the site's skills: {e}"), None),
     }
 }
 
@@ -296,6 +365,10 @@ pub async fn check_connection(app: AppHandle) {
     retry_scene_lookups(&app).await;
     refresh_watchers(&app);
     notify_ui(&app);
+    // With a working token, see whether the site's skills are in step with the game's file.
+    if lock(&state.connection).state == "ok" {
+        check_skills(app.clone(), None).await;
+    }
 }
 
 /// Looks up the site scene again for waiting screenshots that don't have one.

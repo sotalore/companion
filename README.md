@@ -46,6 +46,22 @@ real one: `201` for a new file, `200` for a repeat, `422` for a wrong type. `FAI
 uploads fail with `503`, so you can watch the retries, and `SCOPES=read` gives a token without `upload`. In the
 app, set the site to `http://localhost:4567` and paste `slt_fake`.
 
+## Phase 2: is the site's skill list in step with the game?
+
+When `sl-admin` writes `sotalore-game-skills.json` (`/sladmin gameskills`), the app compares it with the site's
+skills (`GET /api/v1/skills`, scope `read`) and shows what differs, matching skills on the game's `id` (a game
+`key` can change). It also checks on start, when the token changes, and from the Skills section's Check button.
+It reports in the terms of `rails skills:sync`, which is what brings the site in step:
+
+- **New in the game:** sync would add them. **Changed** (name, game key or XP factor): sync would update them.
+- **Moved school or category:** sync only reports these, since a skill's site key names its school. The game's
+  school names are mapped to the site's first (`game_schools`: Polearms is `polearm`, Moon is `lunar`).
+- **Gone from the game:** sync would remove them. **On the site with no game id:** not linked to any game skill.
+
+Nothing is sent: updating the site is an app change. **Copy issue text** gives Markdown for an issue in
+sotalore/sotalore. The fake API's `GET /skills` builds the site's list from a game-skills file (`SKILLS_FILE`, by
+default the regular client's) and puts six skills out of step on purpose; `SKILLS_DRIFT=0` keeps it in step.
+
 ## Phase 3: screenshots to the scene's gallery
 
 The app watches the game's screenshot folder (`Pictures\SotA` for the regular client, `Pictures\SotA\DEV` for the

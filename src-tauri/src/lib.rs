@@ -10,6 +10,7 @@
 //! - `history`: remembers what was uploaded.
 //! - `scenes`: the scene changes read from the plugin's current-scene file.
 //! - `screenshots`: new screenshots, matched to a scene, waiting for Darren to send or skip.
+//! - `skills`: compares the game's skills file with the site's skills, and reports what differs.
 //! - `state`, `commands`: what the window shows and the actions it can take.
 
 mod api;
@@ -20,6 +21,7 @@ mod scenes;
 mod screenshots;
 mod secrets;
 mod settings;
+mod skills;
 mod state;
 mod uploader;
 mod watcher;
@@ -79,6 +81,7 @@ pub fn run() {
             commands::send_screenshot,
             commands::skip_screenshot,
             commands::search_scenes,
+            commands::check_skills,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the companion");
