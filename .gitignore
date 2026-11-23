@@ -1,0 +1,10 @@
+# Rust / Tauri
+target/
+src-tauri/target/
+src-tauri/gen/
+# Web UI
+node_modules/
+dist/
+# Local settings and secrets (the API token never goes in the repo)
+*.local.json
+.env*
