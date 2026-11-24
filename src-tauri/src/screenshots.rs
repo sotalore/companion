@@ -362,9 +362,9 @@ async fn send_now(app: &AppHandle, path: &Path, scene: &SiteScene) -> Result<(bo
 pub fn scope_help(site_message: &str, scope: &str) -> String {
     let site_message = site_message.trim_end_matches('.');
     format!(
-        "The site refused it: {site_message}. Sending needs a token with the `{scope}` scope. \
-         Make a new token at ADM → AI Access with `upload`, `read` and `images`, paste it under Site \
-         (it replaces the saved one), then press Send again."
+        "The site refused it: {site_message}. This needs a token with the `{scope}` scope. \
+         Make a new token at ADM → AI Access with `upload`, `read`, `images` and `notes`, paste it \
+         under Site (it replaces the saved one), then try again."
     )
 }
 

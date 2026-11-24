@@ -192,7 +192,7 @@ fn update_title(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else { return };
     let waiting = Waiting {
         screenshots: lock(&state.shots).waiting(),
-        notes: lock(&state.notes).list.iter().filter(|n| matches!(n.status.as_str(), "recorded" | "failed")).count(),
+        notes: lock(&state.notes).list.iter().filter(|n| n.waits_on_darren()).count(),
         skills_out_of_step: lock(&state.skills).report.as_ref().is_some_and(|r| !r.in_step),
         recording: lock(&state.talk).recording,
     };

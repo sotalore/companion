@@ -235,6 +235,13 @@ pub fn transcribe_notes(app: AppHandle) -> Result<usize, String> {
     notes::transcribe_all(app)
 }
 
+/// Upload a note's transcript, as Darren corrected it, to its scene's private notes. Only the text
+/// is sent, never the recording.
+#[tauri::command]
+pub fn upload_note(app: AppHandle, id: String) -> Result<(), String> {
+    notes::upload(app, id)
+}
+
 /// Send: add a waiting screenshot to a scene's gallery. `scene` is the one shown with it, or one
 /// Darren chose from a search. This is the only way a screenshot leaves the machine.
 #[tauri::command]

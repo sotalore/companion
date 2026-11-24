@@ -89,7 +89,7 @@ function draw(state) {
   $("shot-scopes").hidden = missing.length === 0;
   $("shot-scopes").textContent = missing.length
     ? `This token doesn't have ${missing.map((s) => "`" + s + "`").join(" or ")}, which screenshots need. ` +
-      "Make a new token at ADM → AI Access with upload, read and images, and paste it under Site: it replaces the saved one."
+      "Make a new token at ADM → AI Access with upload, read, images and notes, and paste it under Site: it replaces the saved one."
     : "";
 
   drawSkills(state.skills);
@@ -307,6 +307,7 @@ function toggleChooser(card, shot) {
 // search, and a transcript being corrected.
 const noteCards = new Map();
 const BUSY = ["queued", "transcribing"];
+const SENT = ["uploading", "retrying", "uploaded"];
 
 function drawNotes(state) {
   const talk = state.talk;
@@ -374,20 +375,40 @@ function updateNoteCard(card, note) {
   } else if (note.site_note) {
     lines.push(el("div", { class: "warn" }, note.site_note));
   }
-  if (note.message) lines.push(el("div", { class: "muted" }, note.message));
+  if (note.message) lines.push(el("div", { class: "muted" }, note.message, note.uploaded_url ? " " : null,
+    note.uploaded_url ? reviewLink(note.uploaded_url, "See the scene") : null));
   card.info.replaceChildren(...lines);
 
   // Don't overwrite a correction being typed.
   if (!card.dirty && document.activeElement !== card.text) card.text.value = note.transcript ?? "";
-  card.text.disabled = BUSY.includes(note.status);
+  // Once sent, the text and scene stay as the site has them.
+  const sent = SENT.includes(note.status);
+  card.text.disabled = BUSY.includes(note.status) || sent;
+  card.save.hidden = !card.dirty || sent;
 
-  const buttons = [el("button", { onclick: () => toggleNoteChooser(card, note) }, note.site_scene ? "Another scene..." : "Choose a scene...")];
-  if (!BUSY.includes(note.status)) {
+  const buttons = [];
+  if (["transcribed", "upload_failed"].includes(note.status)) {
+    const ready = note.site_scene && (card.dirty ? card.text.value : note.transcript ?? "").trim();
+    buttons.push(el("button", { class: "send", ...(ready ? {} : { disabled: "" }), onclick: () => uploadNote(card, note) },
+      note.site_scene ? `Upload to ${note.site_scene.name}` : "Upload (choose a scene first)"));
+  }
+  if (!sent) buttons.push(el("button", { onclick: () => toggleNoteChooser(card, note) }, note.site_scene ? "Another scene..." : "Choose a scene..."));
+  if (!BUSY.includes(note.status) && !["uploading", "retrying"].includes(note.status)) {
     buttons.push(el("button", { onclick: () => {
       if (confirm("Delete this note and its recording?")) run("delete_note", { id: note.id });
     } }, "Delete"));
   }
   card.actions.replaceChildren(...buttons);
+}
+
+// Upload: save a correction still being typed first, so what's sent is what's on screen.
+async function uploadNote(card, note) {
+  if (card.dirty) {
+    await run("set_note_transcript", { id: note.id, text: card.text.value });
+    card.dirty = false;
+    card.save.hidden = true;
+  }
+  await run("upload_note", { id: note.id });
 }
 
 // Choosing a note's scene by name: each result sets it (nothing is sent).
@@ -439,8 +460,8 @@ function settingsProblems(state) {
   if (!state.has_token) problems.push("No API token: exports, screenshots and the skills check need one.");
   else if (conn.state === "bad_token") problems.push(conn.message);
   else if (conn.state === "ok") {
-    const missing = ["upload", "read", "images"].filter((s) => !conn.scopes.includes(s));
-    if (missing.length) problems.push(`The token doesn't have ${missing.join(", ")}: make a new one with upload, read and images.`);
+    const missing = ["upload", "read", "images", "notes"].filter((s) => !conn.scopes.includes(s));
+    if (missing.length) problems.push(`The token doesn't have ${missing.join(", ")}: make a new one with upload, read, images and notes.`);
   }
   if (!state.watching_lua) problems.push("No Lua folder: choose the game's Lua folder.");
   if (state.settings.talk_key && !state.talk.key) problems.push(state.talk.message);
@@ -457,7 +478,8 @@ function drawBadges(state) {
     badge.classList.toggle("alert", !!alert);
   };
   const shots = state.screenshots.filter((s) => s.status === "waiting").length;
-  const notes = state.notes.filter((n) => ["recorded", "failed"].includes(n.status)).length;
+  // Notes to transcribe, or to read through and upload (as the window title counts them).
+  const notes = state.notes.filter((n) => ["recorded", "failed", "transcribed", "upload_failed"].includes(n.status)).length;
   const report = state.skills.report;
   const failedUploads = state.activity.some((a) => a.status === "failed");
   const problems = settingsProblems(state);

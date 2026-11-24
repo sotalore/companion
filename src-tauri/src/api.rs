@@ -1,7 +1,8 @@
 //! The site API, as `sotalore/sotalore`'s `docs/api.md` describes it. We use:
 //! - `GET /api/v1/me`: does the token work, and which scopes does it have?
 //! - the three export uploads (scope `upload`);
-//! - `GET /scenes` (scope `read`) and `POST /scenes/:id/images` (scope `images`) for screenshots.
+//! - `GET /scenes` (scope `read`) and `POST /scenes/:id/images` (scope `images`) for screenshots;
+//! - `POST /scenes/:id/notes` (scope `notes`) for spoken notes' transcripts, which are private.
 //!
 //! Retry rules (from CLAUDE.md and the contract): the API answers a repeated file with the first
 //! import, and a repeated image with the first image (`200`), so retrying a send is safe. We retry
@@ -102,6 +103,32 @@ pub struct SceneImage {
     pub created: bool,
     /// The full image's link.
     pub url: Option<String>,
+    /// The scene's page on the site.
+    pub scene_url: Option<String>,
+}
+
+/// A spoken note's transcript, as `POST /scenes/:id/notes` takes it. It borrows the note's fields
+/// (`&'a str`) rather than copying them, like passing a Ruby hash of the note's own strings.
+#[derive(Debug, Serialize)]
+pub struct NewNote<'a> {
+    pub text: &'a str,
+    /// When recording started, ISO 8601 with an offset.
+    pub recorded_at: &'a str,
+    /// The note's own id, made when it was recorded and the same on every retry.
+    pub client_id: &'a str,
+    /// Whole seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcriber: Option<&'a str>,
+}
+
+/// A note the site has (`POST /scenes/:id/notes`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneNote {
+    /// `true` for `201 Created`; `false` for `200 OK`, the site already had this note, same text.
+    pub created: bool,
+    pub id: Option<i64>,
     /// The scene's page on the site.
     pub scene_url: Option<String>,
 }
@@ -291,6 +318,39 @@ impl Client {
         with_retries(delays, on_retry, || self.add_scene_image_once(scene_id, filename, bytes.to_vec(), taken_at))
             .await
     }
+
+    /// One try at adding a note to a scene. A `409` (the `client_id` was sent before with another
+    /// scene or text) comes back as an error like any 4xx: never retried.
+    pub async fn add_scene_note_once(&self, scene_id: i64, note: &NewNote<'_>) -> Result<SceneNote, ApiError> {
+        let response = self
+            .http
+            .post(format!("{}/scenes/{scene_id}/notes", self.api_base))
+            .bearer_auth(&self.token)
+            .json(note)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status().as_u16();
+        let body = check_status(response).await?;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+        Ok(SceneNote {
+            created: status == 201,
+            id: json.get("id").and_then(|v| v.as_i64()),
+            scene_url: json.get("scene").and_then(|s| s.get("url")).and_then(|v| v.as_str()).map(String::from),
+        })
+    }
+
+    /// Adds a note with retries (see `with_retries`). The same `client_id` and text again is a `200`
+    /// with the first note, so retrying is safe.
+    pub async fn add_scene_note(
+        &self,
+        scene_id: i64,
+        note: &NewNote<'_>,
+        delays: &[Duration],
+        on_retry: impl FnMut(&ApiError, Duration),
+    ) -> Result<SceneNote, ApiError> {
+        with_retries(delays, on_retry, || self.add_scene_note_once(scene_id, note)).await
+    }
 }
 
 /// The MIME type for an image file, from its extension. The site works the type out from the bytes
@@ -365,6 +425,58 @@ mod tests {
     use mockito::Matcher;
 
     const NO_WAIT: &[Duration] = &[Duration::from_millis(1), Duration::from_millis(1)];
+
+    fn note() -> NewNote<'static> {
+        NewNote {
+            text: "The inn sells bread.",
+            recorded_at: "2026-11-23T17:00:00-08:00",
+            client_id: "abc123",
+            duration: Some(6),
+            transcriber: Some("whisper-small.en"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sends_a_note_as_json_and_retries_a_503() {
+        let mut server = mockito::Server::new_async().await;
+        // mockito answers with the oldest matching mock first: one 503, then the note.
+        let busy = server.mock("POST", "/api/v1/scenes/41/notes").with_status(503).expect(1).create_async().await;
+        let ok = server
+            .mock("POST", "/api/v1/scenes/41/notes")
+            .match_header("content-type", "application/json")
+            .match_body(Matcher::Json(serde_json::json!({
+                "text": "The inn sells bread.", "recorded_at": "2026-11-23T17:00:00-08:00",
+                "client_id": "abc123", "duration": 6, "transcriber": "whisper-small.en"
+            })))
+            .with_status(201)
+            .with_body(r#"{ "id": 5, "scene": { "id": 41, "name": "Owl's Head", "url": "https://x.test/scenes/41" } }"#)
+            .create_async()
+            .await;
+        let mut retries = 0;
+        let made = Client::new(&server.url(), "slt_test")
+            .add_scene_note(41, &note(), NO_WAIT, |_, _| retries += 1)
+            .await
+            .unwrap();
+        assert_eq!(made, SceneNote { created: true, id: Some(5), scene_url: Some("https://x.test/scenes/41".into()) });
+        assert_eq!(retries, 1);
+        busy.assert_async().await;
+        ok.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_conflicting_note_is_not_retried() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/v1/scenes/41/notes")
+            .with_status(409)
+            .with_body(r#"{ "error": "That client_id was already sent", "note": { "id": 5 } }"#)
+            .expect(1)
+            .create_async()
+            .await;
+        let err = Client::new(&server.url(), "slt_test").add_scene_note(41, &note(), NO_WAIT, |_, _| {}).await.unwrap_err();
+        assert_eq!(err, ApiError::Status { status: 409, message: "That client_id was already sent".into() });
+        mock.assert_async().await;
+    }
 
     #[tokio::test]
     async fn me_reads_the_account_and_scopes() {

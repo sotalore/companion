@@ -100,7 +100,7 @@ over the game. Waiting screenshots are kept across restarts (`screenshots.json` 
 - The fake API (`npm run fake-api`) has three scenes: Owl's Head (`OwlsHead_01`), Novia (`Novia`), and West
   Ravenswood with no game name. `SCOPES=upload,images` makes a token without `read`.
 
-## Phase 4: spoken notes (in progress)
+## Phase 4: spoken notes
 
 Hold the **talk key** (F9 by default; a setting) and say something about the scene you're in. While you hold the
 key, the app records from Windows' default microphone. It opens the mic only then, and the window's title starts
@@ -115,7 +115,15 @@ recordings never leave this PC.**
 - Each note can be played back, given another scene, or deleted (which deletes its recording too).
 - **Transcribe** runs every untranscribed note through Whisper in one batch, at low priority on half the CPU's
   cores. It runs only when you press the button, never on its own. Read each transcript through and correct it in
-  the window. Uploading transcripts to the scene waits for the site's endpoint (sotalore/sotalore#311).
+  the window.
+- **Upload** sends one note's text (never its audio) to its scene's private notes on the site
+  (`POST /api/v1/scenes/:id/notes`, scope `notes`), with when it was recorded, its length and the Whisper model.
+  Only root sees notes on the site. Nothing is uploaded unless you press the button. Once a note is uploaded, its
+  text and scene are locked. Each note has its own `client_id`, made when it's recorded and sent on every try, so
+  a retry never adds it twice: the site answers a repeat with the note it has. Network errors and 5xx are retried;
+  a `409` (the site has that `client_id` with other text or another scene) is shown and not retried.
+- **The token** needs `notes` as well as `upload`, `read` and `images`. The fake API (`npm run fake-api`) takes
+  notes too, and prints only their length, never their text.
 - Whisper (whisper.cpp, through `whisper-rs`) runs on the CPU. On peregrin, `small.en` takes about 3.5 s a note,
   most of it a fixed cost per note. Whisper is also told the game's name and the note's scene, which helps it
   spell names.

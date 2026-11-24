@@ -1,10 +1,11 @@
 // A stand-in for the site's API, for trying the companion without a real token or touching the site.
-// It answers GET /api/v1/me, the three upload endpoints, GET /scenes and POST /scenes/:id/images the
-// way sotalore/docs/api.md says, and GET /skills (see siteSkills below). It keeps nothing on disk
-// (images are counted, not stored).
+// It answers GET /api/v1/me, the three upload endpoints, GET /scenes, POST /scenes/:id/images,
+// POST /scenes/:id/notes and GET /notes the way sotalore/docs/api.md says, and GET /skills (see
+// siteSkills below). It keeps nothing on disk: images are counted, not stored, and notes are kept in
+// memory, their text never printed.
 //
-//   npm run fake-api                    # http://localhost:4567, token slt_fake (upload, read, images)
-//   FAIL_FIRST=2 npm run fake-api       # the first 2 uploads or images get a 503, to watch the retries
+//   npm run fake-api                    # http://localhost:4567, token slt_fake (upload, read, images, notes)
+//   FAIL_FIRST=2 npm run fake-api       # the first 2 uploads, images or notes get a 503, to watch the retries
 //   SCOPES=upload,images npm run fake-api   # a token without read (or leave out any scope)
 //
 // In the companion, set the site to http://localhost:4567 and the token to slt_fake.
@@ -17,7 +18,7 @@ import { readFileSync } from "node:fs";
 
 const PORT = Number(process.env.PORT ?? 4567);
 const TOKEN = process.env.TOKEN ?? "slt_fake";
-const SCOPES = (process.env.SCOPES ?? "upload,read,images").split(",");
+const SCOPES = (process.env.SCOPES ?? "upload,read,images,notes").split(",");
 let failFirst = Number(process.env.FAIL_FIRST ?? 0);
 
 const base = `http://localhost:${PORT}`;
@@ -38,10 +39,69 @@ const REVIEW = { recipes: "recipe_imports", items: "item_catalog_imports", finds
 const seen = new Map(); // sha256 of the file -> the import made for it
 let nextId = 1;
 
-function send(res, status, body) {
+// `logged`: what to print instead of the body, when the body holds something private.
+function send(res, status, body, logged = body) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
-  console.log(`  -> ${status} ${JSON.stringify(body)}`);
+  console.log(`  -> ${status} ${JSON.stringify(logged)}`);
+}
+
+// Scene notes, by client_id (there's one account here, so client_id alone is the key).
+const notes = new Map();
+
+// Sends notes back, but prints each with its text replaced by its length: notes are private, even
+// in a test server's log.
+function sendNotes(res, status, body) {
+  const hide = (n) => ({ ...n, text: `[${n.text.length} characters]` });
+  const logged = body.notes ? { ...body, notes: body.notes.map(hide) } : body.note ? { ...body, note: hide(body.note) } : hide(body);
+  send(res, status, body, logged);
+}
+
+// POST /api/v1/scenes/:id/notes and GET /api/v1/notes (scope notes). Returns true if it answered.
+function notesApi(req, res, body) {
+  const url = new URL(req.url, base);
+  const match = /^\/api\/v1\/scenes\/(\d+)\/notes$/.exec(url.pathname);
+  const listing = req.method === "GET" && url.pathname === "/api/v1/notes";
+  if (!(req.method === "POST" && match) && !listing) return false;
+  if (!SCOPES.includes("notes")) return send(res, 403, { error: "This token doesn't have the notes scope" }), true;
+  if (listing) {
+    const list = [...notes.values()];
+    return sendNotes(res, 200, { notes: list, page: { number: 1, per: 25, total_count: list.length, total_pages: 1 } }), true;
+  }
+  const scene = SCENES.find((s) => s.id === Number(match[1]));
+  if (!scene) return send(res, 404, { error: "Not found" }), true;
+  if (failFirst > 0) {
+    failFirst -= 1;
+    return send(res, 503, { error: "Service unavailable (fake)" }), true;
+  }
+  let json;
+  try {
+    json = JSON.parse(body.toString("utf8"));
+  } catch {
+    return send(res, 422, { errors: ["The body isn't JSON"] }), true;
+  }
+  const errors = [];
+  if (typeof json.text !== "string" || !json.text.trim()) errors.push("Text can't be blank");
+  else if (json.text.length > 20000) errors.push("Text is too long (maximum is 20000 characters)");
+  if (typeof json.client_id !== "string" || !json.client_id) errors.push("Client can't be blank");
+  else if (json.client_id.length > 100) errors.push("Client is too long (maximum is 100 characters)");
+  if (!json.recorded_at) errors.push("Recorded at can't be blank");
+  if (errors.length) return send(res, 422, { errors }), true;
+  if (Number.isNaN(Date.parse(json.recorded_at))) return send(res, 422, { error: "recorded_at isn't a time" }), true;
+  const had = notes.get(json.client_id);
+  if (had) {
+    // The same client_id again: the first note, if it's the same scene and text; otherwise a 409.
+    if (had.scene.id === scene.id && had.text === json.text) return sendNotes(res, 200, had), true;
+    return sendNotes(res, 409, { error: "That client_id was already sent with another scene or text", note: had }), true;
+  }
+  const note = {
+    id: nextId++, scene: { id: scene.id, name: scene.name, url: scene.url }, text: json.text,
+    recorded_at: json.recorded_at, duration: json.duration ?? null, transcriber: json.transcriber ?? null,
+    client_id: json.client_id, created_at: new Date().toISOString(),
+  };
+  notes.set(json.client_id, note);
+  sendNotes(res, 201, note);
+  return true;
 }
 
 // Pulls a field out of a multipart/form-data body: { filename, content } (content is a Buffer).
@@ -177,7 +237,7 @@ createServer((req, res) => {
         token: { name: "fake", scopes: SCOPES, expires_at: null },
       });
     }
-    if (scenesApi(req, res, body)) return;
+    if (scenesApi(req, res, body) || notesApi(req, res, body)) return;
     const endpoint = ENDPOINTS[req.url];
     if (req.method !== "POST" || !endpoint) {
       res.writeHead(404, { "Content-Type": "text/html" });

@@ -99,6 +99,7 @@ pub fn run() {
             commands::set_note_transcript,
             commands::delete_note,
             commands::transcribe_notes,
+            commands::upload_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the companion");
