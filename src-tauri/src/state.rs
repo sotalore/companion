@@ -122,7 +122,7 @@ impl AppState {
             queue,
             shots_queue,
             notes: Mutex::new(Notes::load(&data_dir.join("notes"))),
-            talk: Mutex::new(Talk { key: None, message: String::new(), recording: false }),
+            talk: Mutex::new(Talk { key: None, message: String::new(), recording: false, problem: None }),
             recorder,
             next_id: AtomicU64::new(1),
         }
@@ -178,9 +178,75 @@ impl AppState {
     }
 }
 
-/// Tells the window something changed; it asks for the state again.
+/// Tells the window something changed; it asks for the state again. Also brings the window's title
+/// up to date. (Callers must not be holding the screenshots, notes, skills or talk lock.)
 pub fn notify_ui(app: &AppHandle) {
+    update_title(app);
     let _ = app.emit("changed", ());
+}
+
+/// The window's title says what waits on Darren and whether a note is being recorded. It shows on
+/// the taskbar button, so he sees it with the window minimized or behind the game.
+fn update_title(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let Some(window) = app.get_webview_window("main") else { return };
+    let waiting = Waiting {
+        screenshots: lock(&state.shots).waiting(),
+        notes: lock(&state.notes).list.iter().filter(|n| matches!(n.status.as_str(), "recorded" | "failed")).count(),
+        skills_out_of_step: lock(&state.skills).report.as_ref().is_some_and(|r| !r.in_step),
+        recording: lock(&state.talk).recording,
+    };
+    let title = window_title(&waiting);
+    if window.title().ok().as_deref() != Some(title.as_str()) {
+        let _ = window.set_title(&title);
+    }
+}
+
+/// What the title counts.
+struct Waiting {
+    screenshots: usize,
+    notes: usize,
+    skills_out_of_step: bool,
+    recording: bool,
+}
+
+/// "SotA Lore Companion" when nothing waits; otherwise a short list that fits a taskbar button:
+/// "Companion: 2 screenshots, 3 notes, skills". Recording comes first, so it's never cut off.
+fn window_title(w: &Waiting) -> String {
+    let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+    let mut parts = vec![];
+    if w.screenshots > 0 {
+        parts.push(plural(w.screenshots, "screenshot"));
+    }
+    if w.notes > 0 {
+        parts.push(plural(w.notes, "note"));
+    }
+    if w.skills_out_of_step {
+        parts.push("skills".to_string());
+    }
+    let title = if parts.is_empty() { "SotA Lore Companion".to_string() } else { format!("Companion: {}", parts.join(", ")) };
+    if w.recording {
+        format!("● Recording · {title}")
+    } else {
+        title
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn waiting(screenshots: usize, notes: usize, skills_out_of_step: bool, recording: bool) -> Waiting {
+        Waiting { screenshots, notes, skills_out_of_step, recording }
+    }
+
+    #[test]
+    fn the_title_lists_what_waits() {
+        assert_eq!(window_title(&waiting(0, 0, false, false)), "SotA Lore Companion");
+        assert_eq!(window_title(&waiting(2, 3, true, false)), "Companion: 2 screenshots, 3 notes, skills");
+        assert_eq!(window_title(&waiting(1, 1, false, false)), "Companion: 1 screenshot, 1 note");
+        assert_eq!(window_title(&waiting(0, 0, false, true)), "● Recording · SotA Lore Companion");
+    }
 }
 
 /// Starts or stops the two watchers to match the settings:

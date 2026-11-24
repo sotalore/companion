@@ -12,13 +12,25 @@ Roadmap (tracked in sotalore/hq#3):
 
 How this repo works with the others: https://github.com/sotalore/hq.
 
+## The window
+
+The companion is an ordinary window with a taskbar button (no tray icon): keep it on another monitor, or
+minimize it. Closing it quits the app. It reopens where it was, at the same size.
+
+- **The status strip** at the top shows the scene you're in, the connection to the site, and "● Recording" while
+  the talk key is held.
+- **Tabs:** Screenshots, Notes, Skills, Exports (the files and the upload activity) and Settings (token, folders,
+  talk key, Whisper model). Each tab's badge says what waits on you there, and Settings gets a `!` when something
+  keeps a feature from working. The tab you used last opens next time.
+- **The title**, also on the taskbar button, sums up what waits: "Companion: 2 screenshots, 3 notes, skills".
+  Nothing in game ever brings the window forward or flashes the taskbar.
+
 ## Phase 1: the export uploader
 
 The app watches the game's `Lua/` folder. When `sl-admin` writes an export, the app reads its `type` and uploads
 `recipes`, `items` and `finds` files to the site (`POST /api/v1/recipe_imports`, `/item_catalog_imports`,
 `/finds_imports`, per `docs/api.md` in sotalore/sotalore). Other types (`gameSkills`, `skills`) are never sent.
-Each upload's result and its review link show in the window. Closing the window leaves the app in the tray;
-Quit is on the tray icon's right-click menu.
+Each upload's result and its review link show in the window's Exports tab.
 
 - **Token:** make an AI account at ADM → AI Access with a token that has the `upload` scope, and paste it in.
   It's kept in Windows Credential Manager (`sotalore-companion`, one per site URL), never in a file.
@@ -77,8 +89,8 @@ QA client; a setting). When a new screenshot appears (F11 in game; F10 hides the
    press Send**, because a sent screenshot goes live in the gallery at once. You can choose another scene by name,
    or Skip. Skipping never touches the file.
 
-The tray icon's tooltip says how many screenshots are waiting; the window never pops up over the game. Waiting
-screenshots are kept across restarts (`screenshots.json` in the app's data folder).
+The window's title (and so its taskbar button) says how many screenshots are waiting; the window never pops up
+over the game. Waiting screenshots are kept across restarts (`screenshots.json` in the app's data folder).
 
 - **Token scopes:** `upload` for exports, `read` to find scenes, and `images` to send screenshots. A token can't
   gain a scope, so make a new one with all three and paste it in: it replaces the saved one. The window says which
@@ -91,8 +103,8 @@ screenshots are kept across restarts (`screenshots.json` in the app's data folde
 ## Phase 4: spoken notes (in progress)
 
 Hold the **talk key** (F9 by default; a setting) and say something about the scene you're in. While you hold the
-key, the app records from Windows' default microphone. It opens the mic only then, and the tray icon gets a red
-dot. When you let go, it saves the note as a WAV file in the app's data folder (`notes\`) and labels it with the
+key, the app records from Windows' default microphone. It opens the mic only then, and the window's title starts
+with "● Recording". When you let go, it saves the note as a WAV file in the app's data folder (`notes\`) and labels it with the
 scene you were in when you pressed the key, the same way screenshots are matched. A note recorded while loading
 or logged out belongs to no scene, so choose one by name. Taps shorter than half a second are dropped. **The
 recordings never leave this PC.**

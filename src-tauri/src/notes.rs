@@ -109,6 +109,8 @@ pub struct Talk {
     /// How push-to-talk stands: "Hold F9 to record", or why it can't.
     pub message: String,
     pub recording: bool,
+    /// Why the last recording failed (no microphone...), until the next one works.
+    pub problem: Option<String>,
 }
 
 /// Starts the recording thread. Recordings arrive in `saved`, on that thread.
@@ -120,24 +122,20 @@ pub fn start_recorder(app: &AppHandle) -> Recorder {
             let state = started.state::<AppState>();
             match result {
                 Ok(_) => {
-                    lock(&state.talk).recording = true;
-                    show_recording(&started, true);
+                    let mut talk = lock(&state.talk);
+                    talk.recording = true; // shown in the window and its title
+                    talk.problem = None;
                 }
-                Err(e) => {
-                    state.add_activity("", "note", "failed", e);
-                }
+                Err(e) => lock(&state.talk).problem = Some(e),
             }
             notify_ui(&started);
         },
         move |result| {
             let state = done.state::<AppState>();
             lock(&state.talk).recording = false;
-            show_recording(&done, false);
             match result {
                 Ok(clip) => saved(&done, clip),
-                Err(e) => {
-                    state.add_activity("", "note", "failed", e);
-                }
+                Err(e) => lock(&state.talk).problem = Some(e),
             }
             notify_ui(&done);
         },
@@ -200,7 +198,7 @@ fn saved(app: &AppHandle, clip: Clip) {
     let path = notes.folder.join(format!("{id}.wav"));
     if let Err(e) = std::fs::create_dir_all(&notes.folder).map_err(|e| e.to_string()).and_then(|_| recorder::write_wav(&path, &clip.samples)) {
         drop(notes);
-        state.add_activity("", "note", "failed", format!("Couldn't save the note: {e}"));
+        lock(&state.talk).problem = Some(format!("Couldn't save the note: {e}"));
         return;
     }
     notes.list.insert(
@@ -422,36 +420,6 @@ fn mark_all(app: &AppHandle, ids: &[String], status: &str, message: &str) {
     notes.save();
     drop(notes);
     notify_ui(app);
-}
-
-/// While recording, the tray icon gets a red dot and says so (the window is usually behind the game).
-fn show_recording(app: &AppHandle, recording: bool) {
-    let Some(tray) = app.tray_by_id("main") else { return };
-    let Some(icon) = app.default_window_icon() else { return };
-    if recording {
-        let _ = tray.set_icon(Some(with_red_dot(icon)));
-        let _ = tray.set_tooltip(Some("SotA Lore Companion: recording a note"));
-    } else {
-        let _ = tray.set_icon(Some(icon.clone()));
-        let waiting = lock(&app.state::<AppState>().shots).waiting();
-        screenshots::update_tray(app, waiting);
-    }
-}
-
-/// The app icon with a red dot in its lower right quarter.
-fn with_red_dot(icon: &tauri::image::Image<'_>) -> tauri::image::Image<'static> {
-    let (w, h) = (icon.width() as i64, icon.height() as i64);
-    let mut rgba = icon.rgba().to_vec();
-    let (cx, cy, r) = (w * 3 / 4, h * 3 / 4, w.min(h) / 4);
-    for y in 0..h {
-        for x in 0..w {
-            if (x - cx).pow(2) + (y - cy).pow(2) <= r * r {
-                let i = ((y * w + x) * 4) as usize;
-                rgba[i..i + 4].copy_from_slice(&[220, 30, 30, 255]);
-            }
-        }
-    }
-    tauri::image::Image::new_owned(rgba, w as u32, h as u32)
 }
 
 #[cfg(test)]

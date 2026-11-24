@@ -211,9 +211,6 @@ async fn detect(app: &AppHandle, path: PathBuf) {
     let _ = app.asset_protocol_scope().allow_file(&shot.path);
     let mut shots = lock(&state.shots);
     shots.add(shot);
-    let waiting = shots.waiting();
-    drop(shots);
-    update_tray(app, waiting);
 }
 
 /// Reads the image, waiting a little if it's still being written. `None` if it never completes.
@@ -317,9 +314,7 @@ pub fn send(app: AppHandle, path: PathBuf, scene: SiteScene) -> Result<(), Strin
             }
         }
         shots.save();
-        let waiting = shots.waiting();
         drop(shots);
-        update_tray(&app, waiting);
         notify_ui(&app);
     });
     Ok(())
@@ -384,23 +379,7 @@ pub fn skip(app: &AppHandle, path: &Path) -> Result<(), String> {
     shot.status = "skipped".into();
     shot.message = "Skipped: not sent.".into();
     shots.save();
-    let waiting = shots.waiting();
-    drop(shots);
-    update_tray(app, waiting);
     Ok(())
-}
-
-/// The tray icon's tooltip says how many screenshots wait, so Darren sees it without the window
-/// popping up over the game.
-pub fn update_tray(app: &AppHandle, waiting: usize) {
-    if let Some(tray) = app.tray_by_id("main") {
-        let text = match waiting {
-            0 => "SotA Lore Companion".to_string(),
-            1 => "SotA Lore Companion: 1 screenshot to review".to_string(),
-            n => format!("SotA Lore Companion: {n} screenshots to review"),
-        };
-        let _ = tray.set_tooltip(Some(text));
-    }
 }
 
 #[cfg(test)]

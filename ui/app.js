@@ -96,6 +96,7 @@ function draw(state) {
   drawScene(state.current_scene);
   drawShots(state.screenshots, state);
   drawNotes(state);
+  drawBadges(state);
 
   // Files
   const rows = state.files.map((f) => {
@@ -309,8 +310,9 @@ const BUSY = ["queued", "transcribing"];
 
 function drawNotes(state) {
   const talk = state.talk;
-  $("talk").className = "status " + (talk.recording ? "bad" : talk.key ? "ok" : "warn");
-  $("talk").textContent = talk.recording ? "Recording... let go of the key to stop." : talk.message;
+  $("talk").className = "status " + (talk.recording || talk.problem ? "bad" : talk.key ? "ok" : "warn");
+  $("talk").textContent = talk.recording ? "Recording... let go of the key to stop." : talk.problem ?? talk.message;
+  $("recording").hidden = !talk.recording;
 
   const notes = state.notes;
   const todo = notes.filter((n) => ["recorded", "failed"].includes(n.status)).length;
@@ -415,6 +417,57 @@ function toggleNoteChooser(card, note) {
   box.replaceChildren(el("div", { class: "row" }, input, el("button", { onclick: search }, "Search")), results);
   box.hidden = false;
   input.focus();
+}
+
+// The tabs: one shown at a time, and the last one used opens next time (kept in the window's storage).
+const TABS = ["screenshots", "notes", "skills", "exports", "settings"];
+
+function showTab(name) {
+  if (!TABS.includes(name)) name = TABS[0];
+  for (const tab of TABS) $("tab-" + tab).hidden = tab !== name;
+  for (const button of document.querySelectorAll("#tabs button")) button.classList.toggle("active", button.dataset.tab === name);
+  localStorage.setItem("tab", name);
+}
+
+for (const button of document.querySelectorAll("#tabs button")) button.addEventListener("click", () => showTab(button.dataset.tab));
+showTab(localStorage.getItem("tab"));
+
+// What keeps a feature from working, for the Settings tab and its badge.
+function settingsProblems(state) {
+  const problems = [];
+  const conn = state.connection;
+  if (!state.has_token) problems.push("No API token: exports, screenshots and the skills check need one.");
+  else if (conn.state === "bad_token") problems.push(conn.message);
+  else if (conn.state === "ok") {
+    const missing = ["upload", "read", "images"].filter((s) => !conn.scopes.includes(s));
+    if (missing.length) problems.push(`The token doesn't have ${missing.join(", ")}: make a new one with upload, read and images.`);
+  }
+  if (!state.watching_lua) problems.push("No Lua folder: choose the game's Lua folder.");
+  if (state.settings.talk_key && !state.talk.key) problems.push(state.talk.message);
+  if (state.has_whisper && !state.settings.whisper_model) problems.push("No Whisper model file: notes can't be transcribed.");
+  return problems;
+}
+
+// A badge on each tab for what waits on Darren there (a count, or "!" for something to look at).
+function drawBadges(state) {
+  const set = (tab, text, alert) => {
+    const badge = $("badge-" + tab);
+    badge.hidden = !text;
+    badge.textContent = text || "";
+    badge.classList.toggle("alert", !!alert);
+  };
+  const shots = state.screenshots.filter((s) => s.status === "waiting").length;
+  const notes = state.notes.filter((n) => ["recorded", "failed"].includes(n.status)).length;
+  const report = state.skills.report;
+  const failedUploads = state.activity.some((a) => a.status === "failed");
+  const problems = settingsProblems(state);
+  set("screenshots", shots ? String(shots) : "");
+  set("notes", state.talk.problem ? "!" : notes ? String(notes) : "", !!state.talk.problem);
+  set("skills", report && !report.in_step ? "!" : "", true);
+  set("exports", failedUploads ? "!" : "", true);
+  set("settings", problems.length ? "!" : "", true);
+  $("settings-problems").hidden = problems.length === 0;
+  $("settings-problems").replaceChildren(...problems.map((p) => el("div", {}, p)));
 }
 
 async function refresh() {

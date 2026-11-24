@@ -1,5 +1,5 @@
-//! The SotA Lore companion. `run` builds the app: its state, the upload worker, the tray icon and the
-//! window, then hands control to Tauri's event loop until the user picks Quit.
+//! The SotA Lore companion. `run` builds the app: its state, the workers and the window, then hands
+//! control to Tauri's event loop until the window is closed.
 //!
 //! The modules, roughly in the order a file goes through them:
 //! - `settings`, `secrets`: where the folder, the site and the token are kept.
@@ -31,9 +31,12 @@ mod uploader;
 mod watcher;
 
 use state::AppState;
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, WindowEvent};
+use tauri::{AppHandle, Manager};
+use tauri_plugin_window_state::{StateFlags, WindowExt};
+
+/// What the window remembers between runs: where it was and how big, so it reopens on the same
+/// monitor. Not whether it was shown, since it always opens.
+const REMEMBER: StateFlags = StateFlags::POSITION.union(StateFlags::SIZE).union(StateFlags::MAXIMIZED);
 
 pub fn run() {
     tauri::Builder::default()
@@ -42,6 +45,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         // Push-to-talk: a key that works while the game has focus (`notes::register_talk_key`).
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Saves the window's position and size when it closes (in the app's config folder).
+        .plugin(tauri_plugin_window_state::Builder::new().with_state_flags(REMEMBER).build())
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             let data_dir = app.path().app_data_dir()?;
@@ -54,16 +59,11 @@ pub fn run() {
             uploader::start(app.handle().clone(), jobs);
             screenshots::start(app.handle().clone(), new_shots);
 
-            build_tray(app.handle())?;
-
-            // Screenshots still waiting from last time: let the window show them, and say so on the tray.
+            // Screenshots and notes from last time: let the window show them.
             let state = app.state::<AppState>();
-            let shots = state::lock(&state.shots);
-            for shot in &shots.list {
+            for shot in &state::lock(&state.shots).list {
                 let _ = app.asset_protocol_scope().allow_file(&shot.path);
             }
-            screenshots::update_tray(app.handle(), shots.waiting());
-            drop(shots);
             for note in &state::lock(&state.notes).list {
                 let _ = app.asset_protocol_scope().allow_file(&note.path);
             }
@@ -72,14 +72,16 @@ pub fn run() {
             // Start watching now (scene changes need no token), then check the token with the site.
             state::refresh_watchers(app.handle());
             tauri::async_runtime::spawn(state::check_connection(app.handle().clone()));
-            Ok(())
-        })
-        // Closing the window hides it; the app keeps watching from the tray until Quit.
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
+
+            // The window starts hidden (tauri.conf.json) so it can be put back where it was before
+            // it appears, rather than flash up in the default place first. Closing it quits the app;
+            // minimizing it keeps the app running.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.restore_state(REMEMBER);
+                window.show()?;
             }
+            state::notify_ui(app.handle()); // sets the title
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
@@ -102,29 +104,7 @@ pub fn run() {
         .expect("error while running the companion");
 }
 
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
-    TrayIconBuilder::with_id("main")
-        .icon(app.default_window_icon().expect("the app has an icon").clone())
-        .tooltip("SotA Lore Companion")
-        .menu(&menu)
-        .show_menu_on_left_click(false) // left click shows the window; right click opens the menu
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => show_window(app),
-            "quit" => app.exit(0),
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = event {
-                show_window(tray.app_handle());
-            }
-        })
-        .build(app)?;
-    Ok(())
-}
-
+/// A second start of the app brings the running one's window forward (Darren's own action).
 fn show_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
