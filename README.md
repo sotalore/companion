@@ -87,3 +87,30 @@ screenshots are kept across restarts (`screenshots.json` in the app's data folde
   if they look different).
 - The fake API (`npm run fake-api`) has three scenes: Owl's Head (`OwlsHead_01`), Novia (`Novia`), and West
   Ravenswood with no game name. `SCOPES=upload,images` makes a token without `read`.
+
+## Phase 4: spoken notes (in progress)
+
+Hold the **talk key** (F9 by default; a setting) and say something about the scene you're in. While you hold the
+key, the app records from Windows' default microphone. It opens the mic only then, and the tray icon gets a red
+dot. When you let go, it saves the note as a WAV file in the app's data folder (`notes\`) and labels it with the
+scene you were in when you pressed the key, the same way screenshots are matched. A note recorded while loading
+or logged out belongs to no scene, so choose one by name. Taps shorter than half a second are dropped. **The
+recordings never leave this PC.**
+
+- The talk key is registered with Windows (`RegisterHotKey`), so it works while the game has focus. While the
+  companion runs, the game no longer receives that key, so pick one the game doesn't use. Key names: `F9`,
+  `Ctrl+F9`, `Numpad0`, `ScrollLock`, and so on.
+- Each note can be played back, given another scene, or deleted (which deletes its recording too).
+- **Transcribe** runs every untranscribed note through Whisper in one batch, at low priority on half the CPU's
+  cores. It runs only when you press the button, never on its own. Read each transcript through and correct it in
+  the window. Uploading transcripts to the scene waits for the site's endpoint (sotalore/sotalore#311).
+- Whisper (whisper.cpp, through `whisper-rs`) runs on the CPU. On peregrin, `small.en` takes about 3.5 s a note,
+  most of it a fixed cost per note. Whisper is also told the game's name and the note's scene, which helps it
+  spell names.
+- Building Whisper (the `whisper` feature, on by default) needs libclang (`winget install LLVM.LLVM`) and CMake
+  (the VS Build Tools' "C++ CMake tools"). `src-tauri/.cargo/config.toml` says where they are on peregrin, and sets
+  whisper.cpp's optimization flags, which the build would otherwise drop (it then runs about 4 times slower). If
+  those flags change, run `cargo clean -p whisper-rs-sys` to rebuild it. `--no-default-features` builds without
+  Whisper: notes are recorded but can't be transcribed.
+- You also need a model file. `ggml-small.en.bin` (466 MB) is from the whisper.cpp models on Hugging Face
+  (`huggingface.co/ggerganov/whisper.cpp`). Set its full path under Settings → "Whisper model file".

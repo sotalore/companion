@@ -5,6 +5,7 @@
 use crate::api::{Client, SiteScene};
 use crate::exports;
 use crate::history;
+use crate::notes::{self, Note, Talk};
 use crate::scenes::SceneEntry;
 use crate::screenshots::{self, Shot};
 use crate::secrets;
@@ -39,6 +40,11 @@ pub struct StateView {
     screenshots: Vec<Shot>,
     /// The last comparison of the game's skills with the site's.
     skills: state::SkillsCheck,
+    /// Spoken notes, newest first, and how push-to-talk stands.
+    notes: Vec<Note>,
+    talk: Talk,
+    /// Whether this build can transcribe (it was built with the `whisper` feature).
+    has_whisper: bool,
 }
 
 #[derive(Serialize)]
@@ -90,6 +96,9 @@ pub fn get_state(state: State<'_, AppState>) -> StateView {
         activity: lock(&state.activity).iter().cloned().collect(),
         screenshots: lock(&state.shots).list.clone(),
         skills: lock(&state.skills).clone(),
+        notes: lock(&state.notes).list.clone(),
+        talk: lock(&state.talk).clone(),
+        has_whisper: cfg!(feature = "whisper"),
         settings,
     }
 }
@@ -140,18 +149,23 @@ pub async fn save_settings(
     site_url: String,
     auto_upload: bool,
     screenshot_folder: Option<String>,
+    talk_key: String,
+    whisper_model: Option<String>,
 ) -> Result<(), String> {
     let site_url = settings::check_site_url(&site_url)?;
     let lua_folder = folder_setting(lua_folder)?;
     let screenshot_folder = folder_setting(screenshot_folder)?;
+    let whisper_model = file_setting(whisper_model)?;
+    let talk_key = talk_key.trim().to_string();
     let site_changed = {
         let state = app.state::<AppState>();
         let mut settings = lock(&state.settings);
         let site_changed = settings.site() != site_url;
-        *settings = Settings { lua_folder, site_url, auto_upload, screenshot_folder };
+        *settings = Settings { lua_folder, site_url, auto_upload, screenshot_folder, talk_key, whisper_model };
         settings.save(&state.settings_path).map_err(|e| format!("Couldn't save the settings: {e}"))?;
         site_changed
     };
+    notes::register_talk_key(&app);
     if site_changed {
         // A different site has its own token (or none), so check again.
         state::check_connection(app).await;
@@ -174,6 +188,51 @@ fn folder_setting(text: Option<String>) -> Result<Option<PathBuf>, String> {
         }
         None => Ok(None),
     }
+}
+
+/// A file typed in the settings: blank for none, or a file that exists.
+fn file_setting(text: Option<String>) -> Result<Option<PathBuf>, String> {
+    match text.map(|f| f.trim().trim_matches('"').to_string()).filter(|f| !f.is_empty()) {
+        Some(file) => {
+            let path = PathBuf::from(file);
+            if path.is_file() {
+                Ok(Some(path))
+            } else {
+                Err(format!("There's no file at {}", path.display()))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+/// Choose the site scene a spoken note belongs to (one from a search, or the one shown with it).
+#[tauri::command]
+pub fn set_note_scene(app: AppHandle, id: String, scene: SiteScene) -> Result<(), String> {
+    notes::set_scene(&app, &id, scene)?;
+    state::notify_ui(&app);
+    Ok(())
+}
+
+/// Save Darren's corrections to a note's transcript.
+#[tauri::command]
+pub fn set_note_transcript(app: AppHandle, id: String, text: String) -> Result<(), String> {
+    notes::set_transcript(&app, &id, text)?;
+    state::notify_ui(&app);
+    Ok(())
+}
+
+/// Delete a spoken note and its recording.
+#[tauri::command]
+pub fn delete_note(app: AppHandle, id: String) -> Result<(), String> {
+    let result = notes::delete(&app, &id);
+    state::notify_ui(&app);
+    result
+}
+
+/// Transcribe every note not transcribed yet, in one batch in the background. Returns how many.
+#[tauri::command]
+pub fn transcribe_notes(app: AppHandle) -> Result<usize, String> {
+    notes::transcribe_all(app)
 }
 
 /// Send: add a waiting screenshot to a scene's gallery. `scene` is the one shown with it, or one

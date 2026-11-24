@@ -9,6 +9,8 @@
 use crate::api::{ApiError, Client, SiteScene};
 use crate::exports;
 use crate::history::History;
+use crate::notes::{Notes, Talk};
+use crate::recorder::Recorder;
 use crate::scenes::{self, Timeline};
 use crate::screenshots::{self, Shots};
 use crate::secrets;
@@ -80,6 +82,10 @@ pub struct AppState {
     pub queue: UnboundedSender<Job>,
     /// New screenshots for the screenshot worker.
     pub shots_queue: UnboundedSender<PathBuf>,
+    /// The spoken notes, and push-to-talk: the key, whether it's recording, and the recording thread.
+    pub notes: Mutex<Notes>,
+    pub talk: Mutex<Talk>,
+    pub recorder: Recorder,
     next_id: AtomicU64,
 }
 
@@ -99,6 +105,7 @@ impl AppState {
         data_dir: &Path,
         queue: UnboundedSender<Job>,
         shots_queue: UnboundedSender<PathBuf>,
+        recorder: Recorder,
     ) -> AppState {
         AppState {
             settings: Mutex::new(Settings::load(&settings_path)),
@@ -114,6 +121,9 @@ impl AppState {
             shots_watcher: Mutex::new(None),
             queue,
             shots_queue,
+            notes: Mutex::new(Notes::load(&data_dir.join("notes"))),
+            talk: Mutex::new(Talk { key: None, message: String::new(), recording: false }),
+            recorder,
             next_id: AtomicU64::new(1),
         }
     }
@@ -388,5 +398,26 @@ async fn retry_scene_lookups(app: &AppHandle) {
             listed.site_note = shot.site_note;
         }
         shots.save();
+    }
+    // The same for spoken notes.
+    let todo: Vec<(String, String)> = lock(&state.notes)
+        .list
+        .iter()
+        .filter(|n| n.site_scene.is_none())
+        .filter_map(|n| Some((n.id.clone(), n.scene.as_ref()?.raw_name.clone()?)))
+        .collect();
+    for (id, raw) in todo {
+        let found = screenshots::find_site_scene(app, &raw).await;
+        let mut notes = lock(&state.notes);
+        if let Some(note) = notes.find_mut(&id).filter(|n| n.site_scene.is_none()) {
+            match found {
+                Ok(scene) => {
+                    note.site_scene = Some(scene);
+                    note.site_note.clear();
+                }
+                Err(why) => note.site_note = why,
+            }
+        }
+        notes.save();
     }
 }

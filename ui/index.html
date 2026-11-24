@@ -22,6 +22,15 @@
   </section>
 
   <section>
+    <h2>Spoken notes</h2>
+    <p id="talk" class="status"></p>
+    <p class="hint">Hold the talk key and say what you see; each note is labelled with the scene you're in.
+      The recordings stay on this PC. Transcribe them after you play: Whisper keeps the CPU busy for a while.</p>
+    <div class="row status-row"><p id="transcribe-status" class="hint"></p><button id="transcribe" type="button">Transcribe</button></div>
+    <div id="notes"></div>
+  </section>
+
+  <section>
     <h2>Skills</h2>
     <div class="row status-row"><p id="skills-status" class="status"></p><button id="check-skills" type="button">Check</button></div>
     <p class="hint">Compares the game's skills (<code>/sladmin gameskills</code> writes them) with the site's. Nothing is
@@ -56,6 +65,12 @@
       <input id="shot-folder" type="text" spellcheck="false">
       <div class="row" id="shot-presets"></div>
       <p id="client-mismatch" class="hint warn" hidden></p>
+      <label for="talk-key">Push-to-talk key (blank for none)</label>
+      <input id="talk-key" type="text" spellcheck="false" placeholder="F9">
+      <p class="hint">A key name such as <code>F9</code>, <code>Ctrl+F9</code> or <code>Numpad0</code>. While the companion
+        runs, the game no longer sees this key.</p>
+      <label for="whisper-model">Whisper model file</label>
+      <input id="whisper-model" type="text" spellcheck="false" placeholder="The full path to ggml-small.en.bin or another model">
       <label for="site-url">Site</label>
       <input id="site-url" type="text" spellcheck="false">
       <label class="check"><input id="auto-upload" type="checkbox"> Upload new exports as the game writes them</label>

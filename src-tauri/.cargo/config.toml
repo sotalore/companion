@@ -1,0 +1,12 @@
+# Where peregrin's build tools are, for building whisper.cpp (the `whisper` feature). Environment
+# variables of the same name win over these, so another machine can set its own.
+[env]
+# libclang, from LLVM (`winget install LLVM.LLVM`): generates whisper.cpp's Rust bindings.
+LIBCLANG_PATH = "C:/Program Files/LLVM/bin"
+# The CMake that comes with the VS Build Tools' C++ workload ("C++ CMake tools for Windows").
+CMAKE = "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
+# whisper.cpp's compiler flags. The `cmake` crate, with the Visual Studio generator, replaces CMake's
+# release flags with its own, which leave out optimization (`/O2`): whisper.cpp then runs several times
+# slower. whisper-rs passes CMAKE_* variables on to CMake, and the crate leaves these alone when set.
+CMAKE_C_FLAGS_RELEASE = "/MD /O2 /Ob2 /DNDEBUG"
+CMAKE_CXX_FLAGS_RELEASE = "/MD /O2 /Ob2 /DNDEBUG /utf-8"

@@ -10,6 +10,7 @@
 //! - `history`: remembers what was uploaded.
 //! - `scenes`: the scene changes read from the plugin's current-scene file.
 //! - `screenshots`: new screenshots, matched to a scene, waiting for Darren to send or skip.
+//! - `recorder`, `notes`, `transcribe`: push-to-talk spoken notes, labelled by scene, and Whisper.
 //! - `skills`: compares the game's skills file with the site's skills, and reports what differs.
 //! - `state`, `commands`: what the window shows and the actions it can take.
 
@@ -17,12 +18,15 @@ mod api;
 mod commands;
 mod exports;
 mod history;
+mod notes;
+mod recorder;
 mod scenes;
 mod screenshots;
 mod secrets;
 mod settings;
 mod skills;
 mod state;
+mod transcribe;
 mod uploader;
 mod watcher;
 
@@ -36,6 +40,8 @@ pub fn run() {
         // A second start of the app shows the running one instead (must be the first plugin).
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_window(app)))
         .plugin(tauri_plugin_opener::init())
+        // Push-to-talk: a key that works while the game has focus (`notes::register_talk_key`).
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             let data_dir = app.path().app_data_dir()?;
@@ -43,7 +49,8 @@ pub fn run() {
             // a thread-safe queue: one end sends, the other waits for the next item.
             let (queue, jobs) = tokio::sync::mpsc::unbounded_channel();
             let (shots_queue, new_shots) = tokio::sync::mpsc::unbounded_channel();
-            app.manage(AppState::new(config_dir.join("settings.json"), &data_dir, queue, shots_queue));
+            let recorder = notes::start_recorder(app.handle());
+            app.manage(AppState::new(config_dir.join("settings.json"), &data_dir, queue, shots_queue, recorder));
             uploader::start(app.handle().clone(), jobs);
             screenshots::start(app.handle().clone(), new_shots);
 
@@ -57,6 +64,10 @@ pub fn run() {
             }
             screenshots::update_tray(app.handle(), shots.waiting());
             drop(shots);
+            for note in &state::lock(&state.notes).list {
+                let _ = app.asset_protocol_scope().allow_file(&note.path);
+            }
+            notes::register_talk_key(app.handle());
 
             // Start watching now (scene changes need no token), then check the token with the site.
             state::refresh_watchers(app.handle());
@@ -82,6 +93,10 @@ pub fn run() {
             commands::skip_screenshot,
             commands::search_scenes,
             commands::check_skills,
+            commands::set_note_scene,
+            commands::set_note_transcript,
+            commands::delete_note,
+            commands::transcribe_notes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the companion");

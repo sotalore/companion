@@ -229,59 +229,53 @@ async fn read_complete(path: &Path) -> Option<Vec<u8>> {
     None
 }
 
-/// Finds the site's scene for a screenshot's game scene (`GET /scenes?game_name=`), using the
-/// answers already had where possible. Fills `site_scene` or says in `site_note` why not.
+/// Finds the site's scene for a screenshot's game scene. Fills `site_scene` or says in `site_note` why not.
 pub async fn look_up_site_scene(app: &AppHandle, shot: &mut Shot) {
     let Some(raw) = shot.scene.as_ref().and_then(|s| s.raw_name.clone()) else {
         return;
     };
+    match find_site_scene(app, &raw).await {
+        Ok(scene) => {
+            shot.site_scene = Some(scene);
+            shot.site_note.clear();
+        }
+        Err(note) => shot.site_note = note,
+    }
+}
+
+/// The site's scene with a game name (`GET /scenes?game_name=`), using the answers already had where
+/// possible. `Err` says, for the window, why there isn't one. Screenshots and spoken notes both use it.
+pub async fn find_site_scene(app: &AppHandle, raw: &str) -> Result<SiteScene, String> {
     let state = app.state::<AppState>();
-    let cached = lock(&state.site_scenes).get(&raw).cloned();
+    let cached = lock(&state.site_scenes).get(raw).cloned();
     let found = match cached {
         Some(found) => found,
         None => {
             let site = state.settings().site().to_string();
-            let token = match secrets::get_token(&site) {
-                Ok(Some(token)) => token,
-                _ => {
-                    shot.site_note = "Add an API token to find this scene on the site.".into();
-                    return;
-                }
+            let Ok(Some(token)) = secrets::get_token(&site) else {
+                return Err("Add an API token to find this scene on the site.".into());
             };
             if !state.has_scope("read") {
-                shot.site_note = "The token needs the read scope to find scenes on the site.".into();
-                return;
+                return Err("The token needs the read scope to find scenes on the site.".into());
             }
-            match Client::new(&site, &token).scenes("game_name", &raw).await {
+            match Client::new(&site, &token).scenes("game_name", raw).await {
                 Ok(list) => {
                     let found = list.into_iter().next();
-                    lock(&state.site_scenes).insert(raw.clone(), found.clone());
+                    lock(&state.site_scenes).insert(raw.to_string(), found.clone());
                     found
                 }
                 Err(ApiError::Status { status: 403, message }) => {
-                    shot.site_note = format!(
+                    return Err(format!(
                         "The site refused the scene lookup ({message}): the token needs the `read` scope."
-                    );
-                    return;
+                    ));
                 }
-                Err(e) => {
-                    shot.site_note = format!("Couldn't look the scene up: {e}");
-                    return;
-                }
+                Err(e) => return Err(format!("Couldn't look the scene up: {e}")),
             }
         }
     };
-    match found {
-        Some(scene) => {
-            shot.site_scene = Some(scene);
-            shot.site_note.clear();
-        }
-        None => {
-            shot.site_note = format!(
-                "No scene on the site has the game name {raw} yet (a finds import links it). Choose one by name, or skip."
-            );
-        }
-    }
+    found.ok_or_else(|| {
+        format!("No scene on the site has the game name {raw} yet (a finds import links it). Choose one by name.")
+    })
 }
 
 /// Darren pressed Send: add the screenshot to `scene`'s gallery. Runs in the background; the list

@@ -18,14 +18,29 @@ pub struct Settings {
     pub auto_upload: bool,
     /// Where the game saves screenshots (F11). New ones here are offered for their scene's gallery.
     pub screenshot_folder: Option<PathBuf>,
+    /// The key held to record a spoken note, written the way the shortcut library reads keys (`F9`,
+    /// `Ctrl+F9`). Blank: no push-to-talk. While the companion runs, Windows gives this key to the
+    /// companion, not the game.
+    pub talk_key: String,
+    /// The Whisper model file (`ggml-small.en.bin` and the like) that transcribes the notes.
+    pub whisper_model: Option<PathBuf>,
 }
+
+pub const DEFAULT_TALK_KEY: &str = "F9";
 
 impl Default for Settings {
     fn default() -> Self {
         // Start with the regular client's folder when it exists.
         let lua_folder = lua_folders().into_iter().map(|(_, path)| path).find(|p| p.is_dir());
         let screenshot_folder = screenshot_folders().into_iter().map(|(_, path)| path).find(|p| p.is_dir());
-        Settings { lua_folder, site_url: DEFAULT_SITE_URL.to_string(), auto_upload: true, screenshot_folder }
+        Settings {
+            lua_folder,
+            site_url: DEFAULT_SITE_URL.to_string(),
+            auto_upload: true,
+            screenshot_folder,
+            talk_key: DEFAULT_TALK_KEY.to_string(),
+            whisper_model: None,
+        }
     }
 }
 
@@ -112,6 +127,7 @@ mod tests {
             site_url: "https://x.test".into(),
             auto_upload: false,
             screenshot_folder: None,
+            ..Settings::default()
         };
         settings.save(&path).unwrap();
         let loaded = Settings::load(&path);
@@ -128,6 +144,7 @@ mod tests {
         let loaded = Settings::load(&path);
         assert_eq!(loaded.site_url, DEFAULT_SITE_URL);
         assert!(loaded.auto_upload);
+        assert_eq!(loaded.talk_key, DEFAULT_TALK_KEY, "an older settings file gets the default key");
     }
 
     #[test]
@@ -137,6 +154,7 @@ mod tests {
             site_url: DEFAULT_SITE_URL.into(),
             auto_upload: true,
             screenshot_folder: Some(PathBuf::from(r"C:\Users\x\Pictures\SotA\DEV")),
+            ..Settings::default()
         };
         assert!(client_mismatch(&s).is_none());
         s.screenshot_folder = Some(PathBuf::from(r"C:\Users\x\Pictures\SotA"));

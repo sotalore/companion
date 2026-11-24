@@ -62,6 +62,8 @@ function draw(state) {
     $("shot-folder").value = state.settings.screenshot_folder ?? "";
     $("site-url").value = state.settings.site_url;
     $("auto-upload").checked = state.settings.auto_upload;
+    $("talk-key").value = state.settings.talk_key;
+    $("whisper-model").value = state.settings.whisper_model ?? "";
     const presets = (list, input) =>
       list
         .filter((f) => f.exists)
@@ -93,6 +95,7 @@ function draw(state) {
   drawSkills(state.skills);
   drawScene(state.current_scene);
   drawShots(state.screenshots, state);
+  drawNotes(state);
 
   // Files
   const rows = state.files.map((f) => {
@@ -299,6 +302,121 @@ function toggleChooser(card, shot) {
   input.focus();
 }
 
+// Spoken notes: a card per note, keyed by id, so a redraw keeps the audio player, any open scene
+// search, and a transcript being corrected.
+const noteCards = new Map();
+const BUSY = ["queued", "transcribing"];
+
+function drawNotes(state) {
+  const talk = state.talk;
+  $("talk").className = "status " + (talk.recording ? "bad" : talk.key ? "ok" : "warn");
+  $("talk").textContent = talk.recording ? "Recording... let go of the key to stop." : talk.message;
+
+  const notes = state.notes;
+  const todo = notes.filter((n) => ["recorded", "failed"].includes(n.status)).length;
+  const busy = notes.some((n) => BUSY.includes(n.status));
+  const button = $("transcribe");
+  button.textContent = todo ? `Transcribe ${todo} note${todo === 1 ? "" : "s"}` : "Transcribe";
+  button.disabled = busy || todo === 0 || !state.has_whisper;
+  $("transcribe-status").textContent = !state.has_whisper
+    ? "This build can't transcribe yet (it needs the whisper feature)."
+    : busy ? "Transcribing..." : !state.settings.whisper_model ? "Choose the Whisper model file in the settings." : "";
+
+  const keep = new Set(notes.map((n) => n.id));
+  for (const [id, card] of noteCards) {
+    if (!keep.has(id)) { card.root.remove(); noteCards.delete(id); }
+  }
+  const list = $("notes");
+  notes.forEach((note, i) => {
+    let card = noteCards.get(note.id);
+    if (!card) { card = makeNoteCard(note); noteCards.set(note.id, card); }
+    updateNoteCard(card, note);
+    if (list.children[i] !== card.root) list.insertBefore(card.root, list.children[i] ?? null);
+  });
+  if (notes.length === 0) {
+    if (!$("no-notes")) list.append(el("p", { id: "no-notes", class: "muted" }, "No notes yet."));
+  } else {
+    $("no-notes")?.remove();
+  }
+}
+
+function makeNoteCard(note) {
+  const audio = el("audio", { controls: "", preload: "none", src: window.__TAURI__.core.convertFileSrc(note.path) });
+  const info = el("div", { class: "info" });
+  const text = el("textarea", { rows: "3", placeholder: "Not transcribed yet." });
+  const save = el("button", { type: "button", hidden: "" }, "Save text");
+  const actions = el("div", { class: "row" });
+  const chooser = el("div", { class: "chooser", hidden: "" });
+  const card = { root: null, info, text, save, actions, chooser, dirty: false };
+  text.addEventListener("input", () => { card.dirty = true; save.hidden = false; });
+  save.addEventListener("click", async () => {
+    await run("set_note_transcript", { id: note.id, text: text.value });
+    card.dirty = false;
+    save.hidden = true;
+  });
+  card.root = el("div", { class: "note" }, el("div", { class: "body" }, info, audio, text, el("div", { class: "row" }, save), actions, chooser));
+  return card;
+}
+
+function updateNoteCard(card, note) {
+  card.root.className = "note " + note.status;
+  const when = new Date(note.recorded_at).toLocaleString();
+  const lines = [el("div", {}, el("span", { class: "tag " + note.status }, note.status), when,
+    el("span", { class: "muted" }, ` · ${note.seconds.toFixed(1)} s`))];
+  lines.push(el("div", {}, "Scene: ", note.scene ? sceneText(note.scene) : el("span", { class: "muted" }, "none")));
+  if (note.scene_note) lines.push(el("div", { class: "muted" }, note.scene_note));
+  if (note.site_scene) {
+    const s = note.site_scene;
+    const where = [s.region, s.level].filter(Boolean).join(", ");
+    lines.push(el("div", {}, "On the site: ", s.url ? reviewLink(s.url, s.name) : s.name, where ? el("span", { class: "muted" }, ` (${where})`) : null));
+  } else if (note.site_note) {
+    lines.push(el("div", { class: "warn" }, note.site_note));
+  }
+  if (note.message) lines.push(el("div", { class: "muted" }, note.message));
+  card.info.replaceChildren(...lines);
+
+  // Don't overwrite a correction being typed.
+  if (!card.dirty && document.activeElement !== card.text) card.text.value = note.transcript ?? "";
+  card.text.disabled = BUSY.includes(note.status);
+
+  const buttons = [el("button", { onclick: () => toggleNoteChooser(card, note) }, note.site_scene ? "Another scene..." : "Choose a scene...")];
+  if (!BUSY.includes(note.status)) {
+    buttons.push(el("button", { onclick: () => {
+      if (confirm("Delete this note and its recording?")) run("delete_note", { id: note.id });
+    } }, "Delete"));
+  }
+  card.actions.replaceChildren(...buttons);
+}
+
+// Choosing a note's scene by name: each result sets it (nothing is sent).
+function toggleNoteChooser(card, note) {
+  const box = card.chooser;
+  if (!box.hidden) { box.hidden = true; return; }
+  const input = el("input", { type: "text", placeholder: "Scene name...", value: note.scene?.name ?? "" });
+  const results = el("div", { class: "results" });
+  const search = async () => {
+    results.replaceChildren(el("span", { class: "muted" }, "Searching..."));
+    let scenes;
+    try {
+      scenes = await run("search_scenes", { query: input.value });
+    } catch (err) {
+      results.replaceChildren(el("span", { class: "error" }, String(err)));
+      return;
+    }
+    results.replaceChildren(
+      ...(scenes.length ? scenes.map((s) => {
+        const where = [s.region, s.level].filter(Boolean).join(", ");
+        return el("button", { onclick: () => { box.hidden = true; run("set_note_scene", { id: note.id, scene: s }); } },
+          `${s.name}${where ? ` (${where})` : ""}`);
+      }) : [el("span", { class: "muted" }, "No scene with that in its name.")]),
+    );
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") search(); });
+  box.replaceChildren(el("div", { class: "row" }, input, el("button", { onclick: search }, "Search")), results);
+  box.hidden = false;
+  input.focus();
+}
+
 async function refresh() {
   draw(await invoke("get_state"));
 }
@@ -311,6 +429,7 @@ $("token-form").addEventListener("submit", async (e) => {
 $("clear-token").addEventListener("click", () => run("clear_token"));
 $("recheck").addEventListener("click", () => run("check_connection"));
 $("check-skills").addEventListener("click", () => run("check_skills"));
+$("transcribe").addEventListener("click", () => run("transcribe_notes"));
 
 $("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -319,6 +438,8 @@ $("settings-form").addEventListener("submit", async (e) => {
     screenshotFolder: $("shot-folder").value,
     siteUrl: $("site-url").value,
     autoUpload: $("auto-upload").checked,
+    talkKey: $("talk-key").value,
+    whisperModel: $("whisper-model").value,
   });
   settingsDrawn = false; // show the saved values as the app tidied them
   await refresh();
